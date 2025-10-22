@@ -71,7 +71,9 @@ export default function SMSListScreen({ navigation }) {
           const address = message.address;
           if (!grouped[address]) {
             grouped[address] = {
+              id: address,
               address,
+              name: message.person || null,
               messages: [],
               lastMessage: message.body,
               lastDate: message.date,
