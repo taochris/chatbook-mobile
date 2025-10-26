@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import {
   View,
   Text,
@@ -6,89 +6,86 @@ import {
   StyleSheet,
   ScrollView,
   StatusBar,
+  Animated,
+  ImageBackground,
 } from 'react-native';
 
 export default function HomeScreen({ navigation }) {
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+
+  const handlePressIn = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      friction: 3,
+      tension: 40,
+      useNativeDriver: true,
+    }).start();
+  };
+
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f9fafb" />
+      <ImageBackground
+        source={require('../assets/bg-illustration.png')}
+        style={styles.backgroundImage}
+        resizeMode="cover"
+      >
+        <ScrollView style={styles.scrollContainer} contentContainerStyle={styles.content}>
+          <StatusBar barStyle="dark-content" backgroundColor="#e5e7eb" />
       
-      {/* Fond décoratif */}
-      <View style={styles.decorativeBackground}>
-        <Text style={styles.decorativeEmoji}>💬</Text>
-        <Text style={[styles.decorativeEmoji, styles.decorativeEmoji2]}>📱</Text>
-        <Text style={[styles.decorativeEmoji, styles.decorativeEmoji3]}>💌</Text>
+      {/* En-tête */}
+      <View style={styles.header}>
+        <Text style={styles.logo}>📖</Text>
+        <Text style={styles.title}>Chatbook Export</Text>
+        <Text style={styles.subtitle}>
+          Transformez vos conversations en souvenirs
+        </Text>
       </View>
 
-      <ScrollView 
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
+      {/* Fonctionnalités */}
+      <View style={styles.featuresContainer}>
+        <View style={styles.featureCard}>
+          <Text style={styles.featureTitle}>Rapide</Text>
+          <Text style={styles.featureText}>
+            Export en quelques secondes
+          </Text>
+        </View>
+
+        <View style={styles.featureCard}>
+          <Text style={styles.featureTitle}>Créatif</Text>
+          <Text style={styles.featureText}>
+            Personnalisez votre livre
+          </Text>
+        </View>
+
+        <View style={styles.featureCard}>
+          <Text style={styles.featureTitle}>Sécurisé</Text>
+          <Text style={styles.featureText}>
+            Données chiffrées, expirées après 24h
+          </Text>
+        </View>
+      </View>
+
+      {/* Bouton principal en bas */}
+      <TouchableOpacity 
+        activeOpacity={1}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        onPress={() => navigation.navigate('Export')}
       >
-        {/* En-tête */}
-        <View style={styles.header}>
-          <Text style={styles.logo}>📖</Text>
-          <Text style={styles.title}>Chatbook Export</Text>
-          <Text style={styles.subtitle}>
-            Transformez vos conversations en souvenirs
-          </Text>
-        </View>
-
-        {/* Carte principale */}
-        <View style={styles.card}>
-          <View style={styles.cardIcon}>
-            <Text style={styles.cardIconText}>💬</Text>
-          </View>
-          
-          <Text style={styles.cardTitle}>Exporter mes SMS</Text>
-          <Text style={styles.cardDescription}>
-            Sélectionnez et exportez vos conversations SMS vers l'application web Chatbook
-          </Text>
-
-          <TouchableOpacity 
-            style={styles.primaryButton}
-            activeOpacity={0.8}
-            onPress={() => navigation.navigate('SMSList')}
-          >
-            <Text style={styles.primaryButtonText}>Commencer l'export</Text>
-            <Text style={styles.primaryButtonIcon}>→</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Fonctionnalités */}
-        <View style={styles.featuresContainer}>
-          <View style={styles.featureCard}>
-            <Text style={styles.featureIcon}>🔒</Text>
-            <Text style={styles.featureTitle}>Sécurisé</Text>
-            <Text style={styles.featureText}>
-              Vos données sont chiffrées et expirées après 24h
-            </Text>
-          </View>
-
-          <View style={styles.featureCard}>
-            <Text style={styles.featureIcon}>⚡</Text>
-            <Text style={styles.featureTitle}>Rapide</Text>
-            <Text style={styles.featureText}>
-              Export en quelques secondes avec un code à 6 caractères
-            </Text>
-          </View>
-
-          <View style={styles.featureCard}>
-            <Text style={styles.featureIcon}>📚</Text>
-            <Text style={styles.featureTitle}>Créatif</Text>
-            <Text style={styles.featureText}>
-              Créez un livre personnalisé de vos conversations
-            </Text>
-          </View>
-        </View>
-
-        {/* Footer */}
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            Version 1.0.0 • Made with ❤️
-          </Text>
-        </View>
-      </ScrollView>
+        <Animated.View style={[styles.primaryButton, { transform: [{ scale: scaleAnim }] }]}>
+          <Text style={styles.primaryButtonText}>Commencer l'export</Text>
+          <Text style={styles.primaryButtonIcon}>→</Text>
+        </Animated.View>
+      </TouchableOpacity>
+        </ScrollView>
+      </ImageBackground>
     </View>
   );
 }
@@ -96,161 +93,93 @@ export default function HomeScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f9fafb',
+    backgroundColor: '#e5e7eb',
   },
-  decorativeBackground: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 0,
-  },
-  decorativeEmoji: {
-    position: 'absolute',
-    fontSize: 80,
-    opacity: 0.05,
-    top: 100,
-    left: 20,
-  },
-  decorativeEmoji2: {
-    top: 300,
-    right: 30,
-    left: 'auto',
-    fontSize: 100,
-  },
-  decorativeEmoji3: {
-    bottom: 150,
-    left: 40,
-    top: 'auto',
-    fontSize: 90,
-  },
-  scrollView: {
+  backgroundImage: {
     flex: 1,
-    zIndex: 1,
+    width: '100%',
   },
-  scrollContent: {
-    padding: 20,
+  scrollContainer: {
+    flex: 1,
+  },
+  content: {
+    padding: 16,
     paddingBottom: 40,
+    backgroundColor: 'rgba(229, 231, 235, 0.7)',
   },
   header: {
     alignItems: 'center',
-    marginTop: 40,
-    marginBottom: 32,
+    marginTop: 16,
+    marginBottom: 28,
   },
   logo: {
-    fontSize: 64,
-    marginBottom: 16,
+    fontSize: 40,
+    marginBottom: 8,
   },
   title: {
-    fontSize: 32,
+    fontSize: 22,
     fontWeight: 'bold',
-    color: '#1f2937',
-    marginBottom: 8,
+    color: '#065f46',
+    marginBottom: 6,
     textAlign: 'center',
   },
   subtitle: {
-    fontSize: 16,
-    color: '#6b7280',
+    fontSize: 13,
+    color: '#475569',
     textAlign: 'center',
     paddingHorizontal: 20,
   },
-  card: {
-    backgroundColor: '#ffffff',
-    borderRadius: 16,
-    padding: 24,
-    marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  cardIcon: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#dbeafe',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 16,
-    alignSelf: 'center',
-  },
-  cardIconText: {
-    fontSize: 32,
-  },
-  cardTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#1f2937',
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  cardDescription: {
-    fontSize: 15,
-    color: '#6b7280',
-    textAlign: 'center',
-    marginBottom: 24,
-    lineHeight: 22,
-  },
   primaryButton: {
-    backgroundColor: '#3b82f6',
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: '#6ee7b7',
+    borderRadius: 16,
+    padding: 18,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#3b82f6',
+    marginTop: 'auto',
+    borderWidth: 2,
+    borderColor: '#34d399',
+    marginHorizontal: 16,
+    shadowColor: '#10b981',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 8,
     elevation: 4,
   },
   primaryButtonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '600',
+    color: '#065f46',
+    fontSize: 17,
+    fontWeight: '700',
     marginRight: 8,
   },
   primaryButtonIcon: {
-    color: '#ffffff',
-    fontSize: 20,
+    color: '#065f46',
+    fontSize: 18,
     fontWeight: 'bold',
   },
   featuresContainer: {
-    marginBottom: 24,
+    marginBottom: 40,
+    marginHorizontal: 16,
   },
   featureCard: {
     backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 20,
-    marginBottom: 12,
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 14,
     borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  featureIcon: {
-    fontSize: 32,
-    marginBottom: 12,
+    borderColor: '#34d399',
   },
   featureTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1f2937',
-    marginBottom: 8,
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#34d399',
+    marginBottom: 6,
+    textAlign: 'center',
   },
   featureText: {
-    fontSize: 14,
-    color: '#6b7280',
-    lineHeight: 20,
-  },
-  footer: {
-    alignItems: 'center',
-    paddingVertical: 20,
-  },
-  footerText: {
     fontSize: 13,
-    color: '#9ca3af',
+    color: '#475569',
+    lineHeight: 19,
+    textAlign: 'center',
   },
 });
