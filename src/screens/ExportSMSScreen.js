@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -37,6 +37,7 @@ export default function ExportSMSScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [selectedMessagesInConv, setSelectedMessagesInConv] = useState(new Set());
+  const [filterKey, setFilterKey] = useState(0); // Force refresh du filtrage
 
   const AUDIO_MAX_SIZE = 500 * 1024 * 1024; // 500 MB
 
@@ -94,13 +95,13 @@ export default function ExportSMSScreen() {
         .then(async ([inbox, sent]) => {
           const all = [...inbox, ...sent];
 
-          // Regrouper par address (numéro de téléphone normalisé)
+          // Regrouper par address (numéro de téléphone)
           const map = new Map();
           for (const m of all) {
-            // Normaliser le numéro (supprimer espaces, tirets, parenthèses)
             const rawAddress = (m?.address || '').trim();
             if (!rawAddress) continue;
             
+            // Normaliser pour regroupement: enlever espaces, tirets, parenthèses
             const normalizedNumber = rawAddress.replace(/[\s\-\(\)]/g, '');
             
             // Utiliser le numéro normalisé comme clé unique
@@ -168,18 +169,32 @@ export default function ExportSMSScreen() {
       // Récupérer tous les contacts
       const contacts = await Contacts.getAll();
       
+      // Créer un mapping numéro normalisé -> contact pour éviter les doublons
+      const numberToContact = new Map();
+      
+      for (const contact of contacts) {
+        const phoneNumbers = contact.phoneNumbers || [];
+        for (const p of phoneNumbers) {
+          const normalized = (p.number || '').replace(/[\s\-\(\)]/g, '');
+          if (normalized) {
+            // Garder le contact avec le nom le plus complet
+            const existingContact = numberToContact.get(normalized);
+            const currentName = contact.displayName || contact.givenName || '';
+            const existingName = existingContact?.displayName || existingContact?.givenName || '';
+            
+            if (!existingContact || currentName.length > existingName.length) {
+              numberToContact.set(normalized, contact);
+            }
+          }
+        }
+      }
+      
+      // Résoudre les noms pour chaque conversation
       for (const conv of conversations) {
-        const phoneNumber = conv.address.replace(/[\s\-\(\)]/g, '');
+        const phoneNumber = conv.id; // Déjà normalisé
         
-        // Chercher le contact correspondant
-        const contact = contacts.find(c =>
-          c.phoneNumbers && c.phoneNumbers.some(p => {
-            const normalized = p.number.replace(/[\s\-\(\)]/g, '');
-            // Comparer les 8 derniers chiffres pour gérer les indicatifs
-            return normalized.includes(phoneNumber.slice(-8)) || 
-                   phoneNumber.includes(normalized.slice(-8));
-          })
-        );
+        // Chercher le contact correspondant dans le mapping
+        const contact = numberToContact.get(phoneNumber);
         
         if (contact) {
           conv.name = contact.displayName || contact.givenName || null;
@@ -245,6 +260,10 @@ export default function ExportSMSScreen() {
     return code;
   };
 
+  // Calculer les timestamps des dates pour les dépendances du useMemo
+  const dateFromTimestampKey = dateFrom ? dateFrom.getTime() : 0;
+  const dateToTimestampKey = dateTo ? dateTo.getTime() : Date.now();
+
   const handleExport = async () => {
     if (selectedConversations.size === 0) {
       Alert.alert('Erreur', 'Sélectionnez au moins une conversation');
@@ -270,12 +289,59 @@ export default function ExportSMSScreen() {
     console.log('Période:', dateFrom.toLocaleDateString(), '-', dateTo.toLocaleDateString());
   };
 
-  // Filtrer les conversations selon la recherche
-  const filteredConversations = conversations.filter(conv => {
-    const searchLower = searchQuery.toLowerCase();
-    const name = (conv.name || conv.address).toLowerCase();
-    return name.includes(searchLower);
-  });
+  // Filtrer les conversations selon la recherche et les dates (avec useMemo pour mise à jour auto)
+  const filteredConversations = useMemo(() => {
+    console.log('🔄 Recalcul du filtrage...');
+    console.log('📅 Période:', dateFrom.toLocaleDateString('fr-FR'), '-', dateTo.toLocaleDateString('fr-FR'));
+    
+    // Calculer les timestamps une seule fois
+    const dateFromCopy = new Date(dateFrom);
+    const dateToCopy = new Date(dateTo);
+    const dateFromTimestamp = dateFromCopy.setHours(0, 0, 0, 0);
+    const dateToTimestamp = dateToCopy.setHours(23, 59, 59, 999);
+    
+    console.log('🕐 Timestamps:', dateFromTimestamp, '-', dateToTimestamp);
+    
+    return conversations
+      .filter(conv => {
+        // Filtrer par recherche
+        const searchLower = searchQuery.toLowerCase();
+        const name = (conv.name || conv.address).toLowerCase();
+        return name.includes(searchLower);
+      })
+      .map(conv => {
+        // Filtrer les messages par plage de dates
+        const filteredMessages = conv.messages.filter(msg => {
+          const inRange = msg.date >= dateFromTimestamp && msg.date <= dateToTimestamp;
+          return inRange;
+        });
+        
+        // Log pour la première conversation
+        if (conv === conversations[0]) {
+          console.log(`📊 Exemple: ${conv.name || conv.address}`);
+          console.log(`   Total: ${conv.messages.length}, Filtrés: ${filteredMessages.length}`);
+          if (conv.messages.length > 0) {
+            const firstMsg = new Date(conv.messages[0].date);
+            const lastMsg = new Date(conv.messages[conv.messages.length - 1].date);
+            console.log(`   Messages du ${firstMsg.toLocaleDateString('fr-FR')} au ${lastMsg.toLocaleDateString('fr-FR')}`);
+            console.log(`   Premier message timestamp: ${conv.messages[0].date}`);
+            console.log(`   Dernier message timestamp: ${conv.messages[conv.messages.length - 1].date}`);
+          }
+        }
+        
+        // Retourner la conversation avec info sur les messages filtrés
+        return {
+          ...conv,
+          filteredCount: filteredMessages.length,
+          totalCount: conv.messages.length
+        };
+      });
+  }, [conversations, searchQuery, dateFromTimestampKey, dateToTimestampKey, filterKey]);
+
+  // Conversations effectivement affichées: uniquement celles avec des messages dans la période
+  const displayedConversations = useMemo(() => {
+    return filteredConversations.filter(c => (typeof c.filteredCount === 'number' ? c.filteredCount : c.messages?.length || 0) > 0);
+  }, [filteredConversations]);
 
   if (loading) {
     return (
@@ -298,6 +364,11 @@ export default function ExportSMSScreen() {
     </TouchableOpacity>
   );
 
+  console.log('🎯 RENDU ExportSMSScreen - Conversations filtrées:', filteredConversations.length);
+  if (filteredConversations.length > 0) {
+    console.log('🎯 Premier item:', filteredConversations[0].name, 'filteredCount:', filteredConversations[0].filteredCount, 'totalCount:', filteredConversations[0].totalCount);
+  }
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <StatusBar barStyle="dark-content" backgroundColor="#e5e7eb" />
@@ -308,7 +379,7 @@ export default function ExportSMSScreen() {
       {/* Sélection des conversations */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>
-          Conversations ({filteredConversations.length}) • {selectedConversations.size} sélectionnée(s)
+          Conversations ({displayedConversations.length}) • {selectedConversations.size} sélectionnée(s)
         </Text>
 
         {/* Barre de recherche */}
@@ -322,7 +393,7 @@ export default function ExportSMSScreen() {
 
         {/* Liste avec hauteur fixe et scroll */}
         <View style={styles.conversationListContainer}>
-          {filteredConversations.length === 0 && (
+          {displayedConversations.length === 0 && (
             <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
               <Text style={{ color: '#6b7280', textAlign: 'center' }}>
                 Aucun SMS trouvé.
@@ -332,7 +403,7 @@ export default function ExportSMSScreen() {
             </View>
           )}
           <FlatList
-            data={filteredConversations}
+            data={displayedConversations}
             renderItem={({ item }) => (
               <TouchableOpacity
                 style={styles.conversationItem}
@@ -348,7 +419,7 @@ export default function ExportSMSScreen() {
                     {item.name || item.address}
                   </Text>
                   <Text style={styles.conversationCount}>
-                    {item.messages.length} messages • {item.audioCount} audios • {item.imageCount} images
+                    {item.filteredCount !== undefined ? item.filteredCount : item.messages.length} messages dans la période (total: {item.totalCount || item.messages.length})
                   </Text>
                 </View>
                 <Text style={styles.arrowIcon}>›</Text>
@@ -357,6 +428,7 @@ export default function ExportSMSScreen() {
             keyExtractor={item => item.id}
             showsVerticalScrollIndicator={true}
             nestedScrollEnabled={true}
+            scrollEnabled={false}
           />
         </View>
       </View>
@@ -472,6 +544,7 @@ export default function ExportSMSScreen() {
               <FlatList
                 data={audioFiles}
                 nestedScrollEnabled={true}
+                scrollEnabled={false}
                 renderItem={({ item, index }) => (
                   <TouchableOpacity
                     style={styles.audioItem}
@@ -643,11 +716,17 @@ export default function ExportSMSScreen() {
               <TouchableOpacity
                 style={[styles.datePickerButton, styles.datePickerConfirmButton]}
                 onPress={() => {
+                  // Créer une nouvelle instance de Date pour forcer la mise à jour
+                  const newDate = new Date(tempDate);
                   if (editingDateType === 'from') {
-                    setDateFrom(tempDate);
+                    setDateFrom(newDate);
+                    console.log('📅 Date début mise à jour:', newDate.toLocaleDateString('fr-FR'));
                   } else {
-                    setDateTo(tempDate);
+                    setDateTo(newDate);
+                    console.log('📅 Date fin mise à jour:', newDate.toLocaleDateString('fr-FR'));
                   }
+                  // Forcer le recalcul du filtrage
+                  setFilterKey(prev => prev + 1);
                   setShowDateFromPicker(false);
                   setShowDateToPicker(false);
                 }}
