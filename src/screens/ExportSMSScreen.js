@@ -95,11 +95,25 @@ export default function ExportSMSScreen() {
         .then(async ([inbox, sent]) => {
           const all = [...inbox, ...sent];
 
+          console.log('📱 SMS récupérés - Inbox:', inbox.length, 'Sent:', sent.length, 'Total:', all.length);
+
           // Regrouper par address (numéro de téléphone)
           const map = new Map();
+          const seenMessageIds = new Set(); // Pour éviter les doublons
+          
           for (const m of all) {
             const rawAddress = (m?.address || '').trim();
             if (!rawAddress) continue;
+            
+            // Créer un ID unique basé sur plusieurs critères pour éviter les doublons
+            const messageId = m._id || `${m.date}-${m.address}-${m.type}-${(m.body || '').substring(0, 50)}`;
+            
+            // Ignorer les doublons exacts
+            if (seenMessageIds.has(messageId)) {
+              console.log('⚠️ Message dupliqué ignoré:', messageId);
+              continue;
+            }
+            seenMessageIds.add(messageId);
             
             // Normaliser pour regroupement: enlever espaces, tirets, parenthèses
             const normalizedNumber = rawAddress.replace(/[\s\-\(\)]/g, '');
@@ -115,12 +129,15 @@ export default function ExportSMSScreen() {
               audioCount: 0,
               imageCount: 0,
             };
+            
             existing.messages.push({
-              id: m._id || m.date,
+              id: messageId,
               body: m?.body || '',
               date: m?.date || 0,
               type: m?.type === 1 ? 'received' : 'sent',
+              address: rawAddress,
             });
+            
             if ((m?.date || 0) > existing.lastDate) {
               existing.lastDate = m.date;
               existing.lastMessage = m?.body || '';
@@ -132,6 +149,7 @@ export default function ExportSMSScreen() {
           const list = Array.from(map.values());
           for (const conv of list) {
             conv.messages.sort((a, b) => a.date - b.date);
+            console.log(`📊 ${conv.name || conv.address}: ${conv.messages.length} messages (${conv.messages.filter(m => m.type === 'sent').length} envoyés, ${conv.messages.filter(m => m.type === 'received').length} reçus)`);
           }
 
           // Résoudre les noms via contacts
@@ -216,10 +234,28 @@ export default function ExportSMSScreen() {
   };
 
   const openConversationDetail = (conv) => {
-    setSelectedConversation(conv);
-    // Par défaut, tous les messages sont sélectionnés
-    const allIds = new Set(conv.messages.map(m => m.id));
+    // Filtrer les messages selon la période sélectionnée
+    const dateFromTimestamp = new Date(dateFrom).setHours(0, 0, 0, 0);
+    const dateToTimestamp = new Date(dateTo).setHours(23, 59, 59, 999);
+    
+    const filteredMessages = conv.messages.filter(msg => {
+      return msg.date >= dateFromTimestamp && msg.date <= dateToTimestamp;
+    });
+    
+    // Créer une conversation filtrée
+    const filteredConv = {
+      ...conv,
+      messages: filteredMessages,
+      allMessages: conv.messages // Garder tous les messages pour référence
+    };
+    
+    setSelectedConversation(filteredConv);
+    
+    // Par défaut, tous les messages filtrés sont sélectionnés
+    const allIds = new Set(filteredMessages.map(m => m.id));
     setSelectedMessagesInConv(allIds);
+    
+    console.log(`📅 Ouverture conversation: ${conv.messages.length} messages total, ${filteredMessages.length} dans la période`);
   };
 
   const toggleMessageInConv = (msgId) => {
@@ -233,6 +269,28 @@ export default function ExportSMSScreen() {
   };
 
   const closeConversationDetail = () => {
+    // Sauvegarder la sélection des messages pour cette conversation
+    if (selectedConversation) {
+      // Mettre à jour la conversation avec les messages sélectionnés
+      const updatedConversations = conversations.map(conv => {
+        if (conv.id === selectedConversation.id) {
+          return {
+            ...conv,
+            selectedMessageIds: Array.from(selectedMessagesInConv)
+          };
+        }
+        return conv;
+      });
+      setConversations(updatedConversations);
+      
+      // Ajouter la conversation aux sélectionnées si au moins 1 message est sélectionné
+      if (selectedMessagesInConv.size > 0) {
+        const newSelected = new Set(selectedConversations);
+        newSelected.add(selectedConversation.id);
+        setSelectedConversations(newSelected);
+      }
+    }
+    
     setSelectedConversation(null);
     setSelectedMessagesInConv(new Set());
   };
@@ -249,15 +307,6 @@ export default function ExportSMSScreen() {
       .filter(f => f.selected)
       .reduce((sum, f) => sum + f.size, 0);
     setAudioTotalSize(total);
-  };
-
-  const generateExportCode = () => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return code;
   };
 
   // Calculer les timestamps des dates pour les dépendances du useMemo
@@ -278,15 +327,40 @@ export default function ExportSMSScreen() {
       return;
     }
 
-    // Générer le code d'export
-    const code = generateExportCode();
-    setExportCode(code);
-    setShowExportModal(true);
-
-    // TODO: Envoyer les données à Firebase avec ce code
-    console.log('Export avec code:', code);
-    console.log('Conversations sélectionnées:', selectedConversations.size);
-    console.log('Période:', dateFrom.toLocaleDateString(), '-', dateTo.toLocaleDateString());
+    setLoading(true);
+    
+    try {
+      // Préparer les conversations sélectionnées
+      const selectedConvs = conversations.filter(c => selectedConversations.has(c.id));
+      
+      // Importer le service d'export
+      const { uploadExportData } = require('../services/mobileExportService');
+      
+      // Uploader vers Firebase
+      const code = await uploadExportData({
+        conversations: selectedConvs,
+        dateFrom,
+        dateTo,
+        options: {
+          includeText,
+          includeImages,
+          includeAudio
+        }
+      });
+      
+      console.log('✅ Export réussi avec code:', code);
+      setExportCode(code);
+      setShowExportModal(true);
+      
+    } catch (error) {
+      console.error('❌ Erreur export:', error);
+      Alert.alert(
+        'Erreur d\'export',
+        `Impossible d'exporter les données: ${error.message}`
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Filtrer les conversations selon la recherche et les dates (avec useMemo pour mise à jour auto)
@@ -376,64 +450,7 @@ export default function ExportSMSScreen() {
       {/* Titre */}
       <Text style={styles.title}>Exporter mes SMS</Text>
 
-      {/* Sélection des conversations */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>
-          Conversations ({displayedConversations.length}) • {selectedConversations.size} sélectionnée(s)
-        </Text>
-
-        {/* Barre de recherche */}
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Rechercher un contact..."
-          placeholderTextColor="#9ca3af"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-        />
-
-        {/* Liste avec hauteur fixe et scroll */}
-        <View style={styles.conversationListContainer}>
-          {displayedConversations.length === 0 && (
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-              <Text style={{ color: '#6b7280', textAlign: 'center' }}>
-                Aucun SMS trouvé.
-                {'\n'}
-                Vérifiez que la permission SMS est accordée dans Réglages {'>'} Applications {'>'} Chatbook Export {'>'} Permissions {'>'} SMS.
-              </Text>
-            </View>
-          )}
-          <FlatList
-            data={displayedConversations}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={styles.conversationItem}
-                onPress={() => openConversationDetail(item)}
-                onLongPress={() => toggleConversation(item.id)}
-              >
-                <Checkbox
-                  value={selectedConversations.has(item.id)}
-                  onValueChange={() => toggleConversation(item.id)}
-                />
-                <View style={styles.conversationInfo}>
-                  <Text style={styles.conversationName}>
-                    {item.name || item.address}
-                  </Text>
-                  <Text style={styles.conversationCount}>
-                    {item.filteredCount !== undefined ? item.filteredCount : item.messages.length} messages dans la période (total: {item.totalCount || item.messages.length})
-                  </Text>
-                </View>
-                <Text style={styles.arrowIcon}>›</Text>
-              </TouchableOpacity>
-            )}
-            keyExtractor={item => item.id}
-            showsVerticalScrollIndicator={true}
-            nestedScrollEnabled={true}
-            scrollEnabled={false}
-          />
-        </View>
-      </View>
-
-      {/* Filtrage par dates */}
+      {/* Filtrage par dates (déplacé au-dessus de la liste) */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Plage de dates</Text>
         
@@ -471,6 +488,74 @@ export default function ExportSMSScreen() {
           </View>
         </View>
 
+      </View>
+
+      {/* Sélection des conversations */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>
+          Conversations ({displayedConversations.length}) • {selectedConversations.size} sélectionnée(s)
+        </Text>
+
+        {/* Barre de recherche */}
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Rechercher un contact..."
+          placeholderTextColor="#9ca3af"
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+        />
+
+        {/* Liste avec hauteur fixe et scroll */}
+        <View style={styles.conversationListContainer}>
+          {displayedConversations.length === 0 && (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+              <Text style={{ color: '#6b7280', textAlign: 'center' }}>
+                Aucun SMS trouvé.
+                {'\n'}
+                Vérifiez que la permission SMS est accordée dans Réglages {'>'} Applications {'>'} Chatbook Export {'>'} Permissions {'>'} SMS.
+              </Text>
+            </View>
+          )}
+          <FlatList
+            data={displayedConversations}
+            renderItem={({ item }) => (
+              <View style={styles.conversationItem}>
+                {/* Zone checkbox agrandie */}
+                <TouchableOpacity
+                  style={styles.checkboxTouchArea}
+                  onPress={() => toggleConversation(item.id)}
+                  activeOpacity={0.6}
+                >
+                  <Checkbox
+                    value={selectedConversations.has(item.id)}
+                    onValueChange={() => toggleConversation(item.id)}
+                  />
+                </TouchableOpacity>
+                
+                {/* Zone principale pour ouvrir le détail */}
+                <TouchableOpacity
+                  style={styles.conversationTouchArea}
+                  onPress={() => openConversationDetail(item)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.conversationInfo}>
+                    <Text style={styles.conversationName}>
+                      {item.name || item.address}
+                    </Text>
+                    <Text style={styles.conversationCount}>
+                      {item.filteredCount !== undefined ? item.filteredCount : item.messages.length} messages dans la période (total: {item.totalCount || item.messages.length})
+                    </Text>
+                  </View>
+                  <Text style={styles.arrowIcon}>›</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            keyExtractor={item => item.id}
+            showsVerticalScrollIndicator={true}
+            nestedScrollEnabled={true}
+            scrollEnabled={false}
+          />
+        </View>
       </View>
 
       {/* Choix des médias */}
@@ -601,6 +686,12 @@ export default function ExportSMSScreen() {
               <Text style={styles.modalHeaderSubtitle}>
                 {selectedMessagesInConv.size} / {selectedConversation.messages.length} sélectionnés
               </Text>
+              <Text style={styles.modalHeaderSubtitle}>
+                {selectedConversation.messages.filter(m => m.type === 'sent').length} envoyés • {selectedConversation.messages.filter(m => m.type === 'received').length} reçus
+              </Text>
+              <Text style={[styles.modalHeaderSubtitle, { fontSize: 12, marginTop: 4 }]}>
+                📅 {dateFrom.toLocaleDateString('fr-FR')} - {dateTo.toLocaleDateString('fr-FR')}
+              </Text>
             </View>
             <FlatList
               data={selectedConversation.messages}
@@ -632,6 +723,19 @@ export default function ExportSMSScreen() {
               keyExtractor={item => item.id.toString()}
               contentContainerStyle={styles.messageList}
             />
+            
+            {/* Bouton Valider en bas de la modal */}
+            <View style={styles.modalFooter}>
+              <TouchableOpacity
+                style={styles.validateButton}
+                onPress={closeConversationDetail}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.validateButtonText}>
+                  Valider ({selectedMessagesInConv.size} message{selectedMessagesInConv.size > 1 ? 's' : ''})
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
       </Modal>
@@ -1117,20 +1221,29 @@ const styles = StyleSheet.create({
   messageList: {
     padding: 16,
   },
-  messageItem: {
+  conversationItem: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     backgroundColor: '#ffffff',
     borderRadius: 12,
-    padding: 12,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: '#e5e7eb',
   },
-  messageContent: {
+  checkboxTouchArea: {
+    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  conversationTouchArea: {
     flex: 1,
-    marginLeft: 12,
-    marginRight: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingRight: 12,
+  },
+  conversationInfo: {
+    flex: 1,
   },
   messageBody: {
     fontSize: 14,
@@ -1156,6 +1269,25 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     color: '#1f2937',
+  },
+  modalFooter: {
+    padding: 16,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  validateButton: {
+    backgroundColor: '#34d399',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  validateButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
   },
   datePickerModal: {
     backgroundColor: '#ffffff',
