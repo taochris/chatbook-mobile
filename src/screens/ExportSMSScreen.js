@@ -93,7 +93,8 @@ export default function ExportSMSScreen() {
 
       Promise.all([fetchBox('inbox'), fetchBox('sent')])
         .then(async ([inbox, sent]) => {
-          const all = [...inbox, ...sent];
+          // Fusionner et trier IMMÉDIATEMENT par date pour éviter le désordre
+          const all = [...inbox, ...sent].sort((a, b) => (a?.date || 0) - (b?.date || 0));
 
           console.log('📱 SMS récupérés - Inbox:', inbox.length, 'Sent:', sent.length, 'Total:', all.length);
 
@@ -148,7 +149,26 @@ export default function ExportSMSScreen() {
           // Trier les messages de chaque conversation par date
           const list = Array.from(map.values());
           for (const conv of list) {
-            conv.messages.sort((a, b) => a.date - b.date);
+            // Tri avec fallback : d'abord par date, puis par type si dates égales
+            conv.messages.sort((a, b) => {
+              const dateDiff = a.date - b.date;
+              if (dateDiff !== 0) return dateDiff;
+              // Si même date, mettre les 'received' avant les 'sent' pour un ordre plus naturel
+              if (a.type === 'received' && b.type === 'sent') return -1;
+              if (a.type === 'sent' && b.type === 'received') return 1;
+              return 0;
+            });
+            
+            // Debug: vérifier les timestamps des premiers messages
+            const firstMessages = conv.messages.slice(0, 5);
+            const hasInvalidDates = firstMessages.some(m => !m.date || m.date === 0);
+            if (hasInvalidDates) {
+              console.log(`⚠️ ${conv.name || conv.address}: Messages avec dates invalides détectés`);
+              firstMessages.forEach((m, i) => {
+                console.log(`  [${i}] ${m.type} - date: ${m.date} (${new Date(m.date).toLocaleString('fr-FR')})`);
+              });
+            }
+            
             console.log(`📊 ${conv.name || conv.address}: ${conv.messages.length} messages (${conv.messages.filter(m => m.type === 'sent').length} envoyés, ${conv.messages.filter(m => m.type === 'received').length} reçus)`);
           }
 
@@ -241,6 +261,9 @@ export default function ExportSMSScreen() {
     const filteredMessages = conv.messages.filter(msg => {
       return msg.date >= dateFromTimestamp && msg.date <= dateToTimestamp;
     });
+    
+    // IMPORTANT: Trier les messages par date (ordre chronologique)
+    filteredMessages.sort((a, b) => a.date - b.date);
     
     // Créer une conversation filtrée
     const filteredConv = {
@@ -936,21 +959,6 @@ const styles = StyleSheet.create({
     color: '#9ca3af',
     fontStyle: 'italic',
   },
-  conversationItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    marginBottom: 6,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  conversationInfo: {
-    flex: 1,
-    marginLeft: 12,
-  },
   conversationName: {
     fontSize: 14,
     fontWeight: '600',
@@ -1220,6 +1228,21 @@ const styles = StyleSheet.create({
   },
   messageList: {
     padding: 16,
+  },
+  messageItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  messageContent: {
+    flex: 1,
+    paddingHorizontal: 12,
   },
   conversationItem: {
     flexDirection: 'row',
