@@ -576,7 +576,7 @@ export default function ExportSMSScreen() {
             keyExtractor={item => item.id}
             showsVerticalScrollIndicator={true}
             nestedScrollEnabled={true}
-            scrollEnabled={false}
+            scrollEnabled={true}
           />
         </View>
       </View>
