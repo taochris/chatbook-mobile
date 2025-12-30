@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
   TouchableOpacity,
   FlatList,
   StatusBar,
@@ -13,6 +12,8 @@ import {
   Alert,
   TextInput,
   Modal,
+  NativeModules,
+  Image,
 } from 'react-native';
 import SmsAndroid from 'react-native-get-sms-android';
 
@@ -25,6 +26,9 @@ export default function ExportSMSScreen() {
   const [showDateFromPicker, setShowDateFromPicker] = useState(false);
   const [showDateToPicker, setShowDateToPicker] = useState(false);
   const [tempDate, setTempDate] = useState(new Date());
+  const [tempDay, setTempDay] = useState('');
+  const [tempMonth, setTempMonth] = useState('');
+  const [tempYear, setTempYear] = useState('');
   const [editingDateType, setEditingDateType] = useState(null); // 'from' | 'to'
   const [exportCode, setExportCode] = useState(null);
   const [showExportModal, setShowExportModal] = useState(false);
@@ -39,6 +43,10 @@ export default function ExportSMSScreen() {
   const [selectedMessagesInConv, setSelectedMessagesInConv] = useState(new Set());
   const [filterKey, setFilterKey] = useState(0); // Force refresh du filtrage
 
+  const dayInputRef = useRef(null);
+  const monthInputRef = useRef(null);
+  const yearInputRef = useRef(null);
+
   const AUDIO_MAX_SIZE = 500 * 1024 * 1024; // 500 MB
 
   useEffect(() => {
@@ -48,14 +56,43 @@ export default function ExportSMSScreen() {
   const requestSMSPermission = async () => {
     if (Platform.OS === 'android') {
       try {
-        const results = await PermissionsAndroid.requestMultiple([
+        const perms = [
           PermissionsAndroid.PERMISSIONS.READ_SMS,
           PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
-        ]);
+        ];
+
+        // Android 13+ uses READ_MEDIA_* permissions for accessing media-related URIs
+        if (Platform.Version >= 33) {
+          if (PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES) {
+            perms.push(PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES);
+          }
+          if (PermissionsAndroid.PERMISSIONS.READ_MEDIA_AUDIO) {
+            perms.push(PermissionsAndroid.PERMISSIONS.READ_MEDIA_AUDIO);
+          }
+        } else {
+          // Android <= 12 needs READ_EXTERNAL_STORAGE to read MMS part content:// URIs
+          if (PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE) {
+            perms.push(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
+          }
+        }
+
+        const results = await PermissionsAndroid.requestMultiple(perms);
         const smsGranted = results[PermissionsAndroid.PERMISSIONS.READ_SMS] === PermissionsAndroid.RESULTS.GRANTED;
         const contactsGranted = results[PermissionsAndroid.PERMISSIONS.READ_CONTACTS] === PermissionsAndroid.RESULTS.GRANTED;
 
         if (smsGranted) {
+          // DEBUG: Check MMS database contents
+          (async () => {
+            try {
+              const mmsReader = NativeModules?.MmsReader;
+              if (mmsReader?.debugMmsDatabase) {
+                const dbInfo = await mmsReader.debugMmsDatabase();
+                console.log('🔍 DEBUG MMS DATABASE:', JSON.stringify(dbInfo, null, 2));
+              }
+            } catch (e) {
+              console.warn('Debug MMS error:', e);
+            }
+          })();
           loadConversations();
         } else {
           console.warn('READ_SMS refusé');
@@ -168,8 +205,6 @@ export default function ExportSMSScreen() {
                 console.log(`  [${i}] ${m.type} - date: ${m.date} (${new Date(m.date).toLocaleString('fr-FR')})`);
               });
             }
-            
-            console.log(`📊 ${conv.name || conv.address}: ${conv.messages.length} messages (${conv.messages.filter(m => m.type === 'sent').length} envoyés, ${conv.messages.filter(m => m.type === 'received').length} reçus)`);
           }
 
           // Résoudre les noms via contacts
@@ -197,7 +232,7 @@ export default function ExportSMSScreen() {
 
     try {
       const Contacts = require('react-native-contacts').default;
-      
+
       // Demander la permission si nécessaire
       const permission = await Contacts.checkPermission();
       if (permission === 'undefined') {
@@ -206,10 +241,10 @@ export default function ExportSMSScreen() {
 
       // Récupérer tous les contacts
       const contacts = await Contacts.getAll();
-      
+
       // Créer un mapping numéro normalisé -> contact pour éviter les doublons
       const numberToContact = new Map();
-      
+
       for (const contact of contacts) {
         const phoneNumbers = contact.phoneNumbers || [];
         for (const p of phoneNumbers) {
@@ -219,21 +254,21 @@ export default function ExportSMSScreen() {
             const existingContact = numberToContact.get(normalized);
             const currentName = contact.displayName || contact.givenName || '';
             const existingName = existingContact?.displayName || existingContact?.givenName || '';
-            
+
             if (!existingContact || currentName.length > existingName.length) {
               numberToContact.set(normalized, contact);
             }
           }
         }
       }
-      
+
       // Résoudre les noms pour chaque conversation
       for (const conv of conversations) {
         const phoneNumber = conv.id; // Déjà normalisé
-        
+
         // Chercher le contact correspondant dans le mapping
         const contact = numberToContact.get(phoneNumber);
-        
+
         if (contact) {
           conv.name = contact.displayName || contact.givenName || null;
         }
@@ -243,42 +278,127 @@ export default function ExportSMSScreen() {
     }
   };
 
-  const toggleConversation = (id) => {
-    const newSelected = new Set(selectedConversations);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
-    } else {
-      newSelected.add(id);
-    }
-    setSelectedConversations(newSelected);
-  };
-
   const openConversationDetail = (conv) => {
-    // Filtrer les messages selon la période sélectionnée
+    // 1. Préparer les dates de filtrage
     const dateFromTimestamp = new Date(dateFrom).setHours(0, 0, 0, 0);
     const dateToTimestamp = new Date(dateTo).setHours(23, 59, 59, 999);
     
-    const filteredMessages = conv.messages.filter(msg => {
+    // 2. Filtrer les SMS de la conversation
+    const filteredSms = (conv.messages || []).filter(msg => {
       return msg.date >= dateFromTimestamp && msg.date <= dateToTimestamp;
     });
     
-    // IMPORTANT: Trier les messages par date (ordre chronologique)
-    filteredMessages.sort((a, b) => a.date - b.date);
+    // 3. Initialiser l'état avec les SMS filtrés (ordre chronologique)
+    const sortedSms = [...filteredSms].sort((a, b) => a.date - b.date);
     
-    // Créer une conversation filtrée
-    const filteredConv = {
+    const initialConv = {
       ...conv,
-      messages: filteredMessages,
-      allMessages: conv.messages // Garder tous les messages pour référence
+      messages: sortedSms,
+      allMessages: conv.messages 
     };
     
-    setSelectedConversation(filteredConv);
+    setSelectedConversation(initialConv);
     
-    // Par défaut, tous les messages filtrés sont sélectionnés
-    const allIds = new Set(filteredMessages.map(m => m.id));
-    setSelectedMessagesInConv(allIds);
+    // Sélectionner tous les SMS par défaut
+    const initialIds = new Set(sortedSms.map(m => m.id));
+    setSelectedMessagesInConv(initialIds);
     
-    console.log(`📅 Ouverture conversation: ${conv.messages.length} messages total, ${filteredMessages.length} dans la période`);
+    console.log(`📅 Ouverture conversation: ${sortedSms.length} SMS trouvés pour la période.`);
+
+    // 4. Charger les MMS en arrière-plan (Android)
+    (async () => {
+      try {
+        if (Platform.OS !== 'android') return;
+        const mmsReader = NativeModules?.MmsReader;
+        if (!mmsReader?.getMmsMedia) return;
+
+        const addr = (conv.address || '').toString();
+        if (!addr) return;
+
+        const mmsItems = await mmsReader.getMmsMedia(addr, dateFromTimestamp, dateToTimestamp);
+        const items = Array.isArray(mmsItems) ? mmsItems : [];
+
+        let needsDefault = false;
+        if (items.length === 0 && mmsReader?.isDefaultSmsApp) {
+          const isDefault = await mmsReader.isDefaultSmsApp();
+          if (!isDefault) needsDefault = true;
+        }
+
+        let imageCount = 0;
+        let audioCount = 0;
+        const mmsMessages = [];
+
+        for (const it of items) {
+          const parts = Array.isArray(it?.parts) ? it.parts : [];
+          const messageParts = [];
+
+          for (const p of parts) {
+            const mt = (p?.mimeType || '').toString().toLowerCase();
+            const data = (p?.data || '').toString().toLowerCase();
+            
+            let type = 'image';
+            if (mt.startsWith('audio/') || data.endsWith('.amr') || data.endsWith('.3gp') || data.endsWith('.m4a')) {
+              type = 'audio';
+              audioCount++;
+            } else {
+              imageCount++;
+            }
+            messageParts.push({ ...p, type });
+          }
+
+          if (messageParts.length > 0) {
+            // Normalisation timestamp MMS (parfois en secondes sur Android)
+            let mmsDate = it.timestamp;
+            if (mmsDate > 0 && mmsDate < 1000000000000) {
+              mmsDate = mmsDate * 1000;
+            }
+
+            mmsMessages.push({
+              id: `mms_${it.mmsId}`,
+              mmsId: it.mmsId,
+              body: it.direction === 'sent' ? '🖼️ Photo envoyée' : '🖼️ Photo reçue',
+              date: mmsDate,
+              type: it.direction,
+              isMms: true,
+              parts: messageParts
+            });
+          }
+        }
+
+        // 5. Fusionner MMS et SMS puis retrier (avec dédoublonnage)
+        setSelectedConversation(prev => {
+          if (!prev || prev.id !== initialConv.id) return prev;
+          
+          // Fusion et dédoublonnage par ID (important si on rouvre la conversation)
+          const allMsgs = [...(prev.messages || []), ...mmsMessages];
+          const uniqueMsgs = Array.from(new Map(allMsgs.map(m => [m.id, m])).values());
+          uniqueMsgs.sort((a, b) => a.date - b.date);
+          
+          console.log(`[MmsReader] ${mmsMessages.length} MMS fusionnés chronologiquement.`);
+          console.log(`Total conversation: ${uniqueMsgs.length} messages.`);
+
+          // Auto-sélection des MMS
+          setSelectedMessagesInConv(current => {
+            const newSelected = new Set(current);
+            mmsMessages.forEach(m => newSelected.add(m.id));
+            return newSelected;
+          });
+
+          return {
+            ...prev,
+            messages: uniqueMsgs,
+            needsDefaultSmsApp: needsDefault,
+            mmsMediaSummary: {
+              imageCount,
+              audioCount,
+              mmsMessageCount: items.length,
+            }
+          };
+        });
+      } catch (e) {
+        console.warn('Erreur lecture MMS:', e?.message || e);
+      }
+    })();
   };
 
   const toggleMessageInConv = (msgId) => {
@@ -292,25 +412,32 @@ export default function ExportSMSScreen() {
   };
 
   const closeConversationDetail = () => {
-    // Sauvegarder la sélection des messages pour cette conversation
     if (selectedConversation) {
-      // Mettre à jour la conversation avec les messages sélectionnés
-      const updatedConversations = conversations.map(conv => {
-        if (conv.id === selectedConversation.id) {
-          return {
-            ...conv,
-            selectedMessageIds: Array.from(selectedMessagesInConv)
-          };
-        }
-        return conv;
+      setConversations(prevConvs => {
+        return prevConvs.map(c => {
+          if (c.id === selectedConversation.id) {
+            // Fusionner les messages actuels (SMS) avec ceux de la vue détail (SMS + MMS)
+            // On utilise une Map pour dédoublonner par ID
+            const allMsgs = [...(c.messages || []), ...selectedConversation.messages];
+            const uniqueMsgs = Array.from(new Map(allMsgs.map(m => [m.id, m])).values());
+            uniqueMsgs.sort((a, b) => a.date - b.date);
+
+            return {
+              ...c,
+              messages: uniqueMsgs,
+              selectedMessageIds: Array.from(selectedMessagesInConv)
+            };
+          }
+          return c;
+        });
       });
-      setConversations(updatedConversations);
       
-      // Ajouter la conversation aux sélectionnées si au moins 1 message est sélectionné
       if (selectedMessagesInConv.size > 0) {
-        const newSelected = new Set(selectedConversations);
-        newSelected.add(selectedConversation.id);
-        setSelectedConversations(newSelected);
+        setSelectedConversations(prevSelected => {
+          const newSelected = new Set(prevSelected);
+          newSelected.add(selectedConversation.id);
+          return newSelected;
+        });
       }
     }
     
@@ -318,23 +445,31 @@ export default function ExportSMSScreen() {
     setSelectedMessagesInConv(new Set());
   };
 
-  const toggleAudioFile = (index) => {
-    const newAudioFiles = [...audioFiles];
-    newAudioFiles[index].selected = !newAudioFiles[index].selected;
-    setAudioFiles(newAudioFiles);
-    updateAudioSize(newAudioFiles);
-  };
-
   const updateAudioSize = (files) => {
-    const total = files
+    const total = (files || [])
       .filter(f => f.selected)
-      .reduce((sum, f) => sum + f.size, 0);
+      .reduce((sum, f) => sum + (f.size || 0), 0);
     setAudioTotalSize(total);
   };
 
-  // Calculer les timestamps des dates pour les dépendances du useMemo
-  const dateFromTimestampKey = dateFrom ? dateFrom.getTime() : 0;
-  const dateToTimestampKey = dateTo ? dateTo.getTime() : Date.now();
+  const toggleAudioFile = (index) => {
+    const newFiles = [...audioFiles];
+    if (newFiles[index]) {
+      newFiles[index].selected = !newFiles[index].selected;
+      setAudioFiles(newFiles);
+      updateAudioSize(newFiles);
+    }
+  };
+
+  const toggleConversation = (id) => {
+    const newSelected = new Set(selectedConversations);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedConversations(newSelected);
+  };
 
   const handleExport = async () => {
     if (selectedConversations.size === 0) {
@@ -355,13 +490,92 @@ export default function ExportSMSScreen() {
     try {
       // Préparer les conversations sélectionnées
       const selectedConvs = conversations.filter(c => selectedConversations.has(c.id));
+
+      // Charger et fusionner les MMS directement ici (sinon l'export peut ne contenir que les SMS)
+      let selectedConvsWithMms = selectedConvs;
+      try {
+        if (Platform.OS === 'android') {
+          const mmsReader = NativeModules?.MmsReader;
+          if (mmsReader?.getMmsMedia && (includeImages || includeAudio)) {
+            const fromTs = new Date(dateFrom).setHours(0, 0, 0, 0);
+            const toTs = new Date(dateTo).setHours(23, 59, 59, 999);
+
+            selectedConvsWithMms = await Promise.all(selectedConvs.map(async (conv) => {
+              try {
+                const addr = (conv?.address || '').toString();
+                if (!addr) return conv;
+
+                const mmsItems = await mmsReader.getMmsMedia(addr, fromTs, toTs);
+                const items = Array.isArray(mmsItems) ? mmsItems : [];
+                if (items.length === 0) return conv;
+
+                const mmsMessages = [];
+                for (const it of items) {
+                  const parts = Array.isArray(it?.parts) ? it.parts : [];
+                  const messageParts = [];
+
+                  for (const p of parts) {
+                    const mime = (p?.mimeType || '').toString();
+                    const isImg = mime.startsWith('image/');
+                    const isAud = mime.startsWith('audio/');
+
+                    if ((isImg && !includeImages) || (isAud && !includeAudio)) continue;
+                    if (!isImg && !isAud) continue;
+
+                    messageParts.push({
+                      partId: p?.partId,
+                      mimeType: p?.mimeType,
+                      uri: p?.uri,
+                      data: p?.data,
+                      type: isImg ? 'image' : 'audio',
+                    });
+                  }
+
+                  if (messageParts.length > 0) {
+                    let mmsDate = it.timestamp;
+                    if (mmsDate > 0 && mmsDate < 1000000000000) {
+                      mmsDate = mmsDate * 1000;
+                    }
+
+                    mmsMessages.push({
+                      id: `mms_${it.mmsId}`,
+                      mmsId: it.mmsId,
+                      body: it.direction === 'sent' ? '🖼️ Photo envoyée' : '🖼️ Photo reçue',
+                      date: mmsDate,
+                      type: it.direction,
+                      isMms: true,
+                      parts: messageParts,
+                    });
+                  }
+                }
+
+                if (mmsMessages.length === 0) return conv;
+
+                const allMsgs = [...(conv.messages || []), ...mmsMessages];
+                const uniqueMsgs = Array.from(new Map(allMsgs.map(m => [m.id, m])).values());
+                uniqueMsgs.sort((a, b) => a.date - b.date);
+
+                return {
+                  ...conv,
+                  messages: uniqueMsgs,
+                };
+              } catch (e) {
+                console.warn('[ExportSMSScreen] Échec chargement MMS pour export:', e?.message || e);
+                return conv;
+              }
+            }));
+          }
+        }
+      } catch (e) {
+        console.warn('[ExportSMSScreen] Chargement MMS global ignoré:', e?.message || e);
+      }
       
       // Importer le service d'export
       const { uploadExportData } = require('../services/mobileExportService');
       
       // Uploader vers Firebase
       const code = await uploadExportData({
-        conversations: selectedConvs,
+        conversations: selectedConvsWithMms,
         dateFrom,
         dateTo,
         options: {
@@ -385,6 +599,10 @@ export default function ExportSMSScreen() {
       setLoading(false);
     }
   };
+
+  // Calculer les timestamps des dates pour les dépendances du useMemo
+  const dateFromTimestampKey = dateFrom ? dateFrom.getTime() : 0;
+  const dateToTimestampKey = dateTo ? dateTo.getTime() : Date.now();
 
   // Filtrer les conversations selon la recherche et les dates (avec useMemo pour mise à jour auto)
   const filteredConversations = useMemo(() => {
@@ -412,19 +630,6 @@ export default function ExportSMSScreen() {
           const inRange = msg.date >= dateFromTimestamp && msg.date <= dateToTimestamp;
           return inRange;
         });
-        
-        // Log pour la première conversation
-        if (conv === conversations[0]) {
-          console.log(`📊 Exemple: ${conv.name || conv.address}`);
-          console.log(`   Total: ${conv.messages.length}, Filtrés: ${filteredMessages.length}`);
-          if (conv.messages.length > 0) {
-            const firstMsg = new Date(conv.messages[0].date);
-            const lastMsg = new Date(conv.messages[conv.messages.length - 1].date);
-            console.log(`   Messages du ${firstMsg.toLocaleDateString('fr-FR')} au ${lastMsg.toLocaleDateString('fr-FR')}`);
-            console.log(`   Premier message timestamp: ${conv.messages[0].date}`);
-            console.log(`   Dernier message timestamp: ${conv.messages[conv.messages.length - 1].date}`);
-          }
-        }
         
         // Retourner la conversation avec info sur les messages filtrés
         return {
@@ -466,230 +671,240 @@ export default function ExportSMSScreen() {
     console.log('🎯 Premier item:', filteredConversations[0].name, 'filteredCount:', filteredConversations[0].filteredCount, 'totalCount:', filteredConversations[0].totalCount);
   }
 
-  return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <StatusBar barStyle="dark-content" backgroundColor="#e5e7eb" />
-
-      {/* Titre */}
-      <Text style={styles.title}>Exporter mes SMS</Text>
-
-      {/* Filtrage par dates (déplacé au-dessus de la liste) */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Plage de dates</Text>
-        
-        <View style={styles.dateRow}>
-          <View style={styles.dateColumn}>
-            <Text style={styles.dateLabel}>Du</Text>
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => {
-                setTempDate(dateFrom);
-                setEditingDateType('from');
-                setShowDateFromPicker(true);
-              }}
-            >
-              <Text style={styles.dateButtonText}>
-                {dateFrom.toLocaleDateString('fr-FR')}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.dateColumn}>
-            <Text style={styles.dateLabel}>Au</Text>
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => {
-                setTempDate(dateTo);
-                setEditingDateType('to');
-                setShowDateToPicker(true);
-              }}
-            >
-              <Text style={styles.dateButtonText}>
-                {dateTo.toLocaleDateString('fr-FR')}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-      </View>
-
-      {/* Sélection des conversations */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>
-          Conversations ({displayedConversations.length}) • {selectedConversations.size} sélectionnée(s)
-        </Text>
-
-        {/* Barre de recherche */}
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Rechercher un contact..."
-          placeholderTextColor="#9ca3af"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-        />
-
-        {/* Liste avec hauteur fixe et scroll */}
-        <View style={styles.conversationListContainer}>
-          {displayedConversations.length === 0 && (
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-              <Text style={{ color: '#6b7280', textAlign: 'center' }}>
-                Aucun SMS trouvé.
-                {'\n'}
-                Vérifiez que la permission SMS est accordée dans Réglages {'>'} Applications {'>'} Chatbook Export {'>'} Permissions {'>'} SMS.
-              </Text>
-            </View>
-          )}
-          <FlatList
-            data={displayedConversations}
-            renderItem={({ item }) => (
-              <View style={styles.conversationItem}>
-                {/* Zone checkbox agrandie */}
-                <TouchableOpacity
-                  style={styles.checkboxTouchArea}
-                  onPress={() => toggleConversation(item.id)}
-                  activeOpacity={0.6}
-                >
-                  <Checkbox
-                    value={selectedConversations.has(item.id)}
-                    onValueChange={() => toggleConversation(item.id)}
-                  />
-                </TouchableOpacity>
-                
-                {/* Zone principale pour ouvrir le détail */}
-                <TouchableOpacity
-                  style={styles.conversationTouchArea}
-                  onPress={() => openConversationDetail(item)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.conversationInfo}>
-                    <Text style={styles.conversationName}>
-                      {item.name || item.address}
-                    </Text>
-                    <Text style={styles.conversationCount}>
-                      {item.filteredCount !== undefined ? item.filteredCount : item.messages.length} messages dans la période (total: {item.totalCount || item.messages.length})
-                    </Text>
-                  </View>
-                  <Text style={styles.arrowIcon}>›</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-            keyExtractor={item => item.id}
-            showsVerticalScrollIndicator={true}
-            nestedScrollEnabled={true}
-            scrollEnabled={true}
-          />
-        </View>
-      </View>
-
-      {/* Choix des médias */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Contenu à inclure</Text>
-
-        <TouchableOpacity
-          style={styles.mediaOption}
-          onPress={() => setIncludeText(!includeText)}
-        >
-          <Checkbox value={includeText} onValueChange={setIncludeText} />
-          <Text style={styles.mediaLabel}>Messages texte</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.mediaOption}
-          onPress={() => setIncludeImages(!includeImages)}
-        >
-          <Checkbox value={includeImages} onValueChange={setIncludeImages} />
-          <Text style={styles.mediaLabel}>Photos/Images</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.mediaOption}
-          onPress={() => setIncludeAudio(!includeAudio)}
-        >
-          <Checkbox value={includeAudio} onValueChange={setIncludeAudio} />
-          <Text style={styles.mediaLabel}>Vocapsules et audios</Text>
-          {includeAudio && (
-            <Text style={styles.audioLimit}>Max 500 MB</Text>
-          )}
-        </TouchableOpacity>
-
-        {includeAudio && audioFiles.length > 0 && (
-          <View style={styles.audioSection}>
-            {/* Jauge de poids */}
-            <View style={styles.audioGauge}>
-              <View style={styles.gaugeLabel}>
-                <Text style={styles.gaugeLabelText}>
-                  {(audioTotalSize / 1024 / 1024).toFixed(1)} MB / 500 MB
-                </Text>
-                {audioTotalSize > AUDIO_MAX_SIZE && (
-                  <Text style={styles.gaugeWarning}>⚠️ Dépassement</Text>
-                )}
-              </View>
-              <View style={styles.gaugeBar}>
-                <View
-                  style={[
-                    styles.gaugeFill,
-                    {
-                      width: `${Math.min((audioTotalSize / AUDIO_MAX_SIZE) * 100, 100)}%`,
-                      backgroundColor:
-                        audioTotalSize > AUDIO_MAX_SIZE ? '#ef4444' : '#34d399',
-                    },
-                  ]}
-                />
-              </View>
-            </View>
-
-            {/* Liste des audios */}
-            <TouchableOpacity
-              style={styles.audioListToggle}
-              onPress={() => setShowAudioList(!showAudioList)}
-            >
-              <Text style={styles.audioListToggleText}>
-                {showAudioList ? '▼' : '▶'} Détail des audios ({audioFiles.length})
-              </Text>
-            </TouchableOpacity>
-
-            {showAudioList && (
-              <FlatList
-                data={audioFiles}
-                nestedScrollEnabled={true}
-                scrollEnabled={false}
-                renderItem={({ item, index }) => (
-                  <TouchableOpacity
-                    style={styles.audioItem}
-                    onPress={() => toggleAudioFile(index)}
-                  >
-                    <Checkbox
-                      value={item.selected}
-                      onValueChange={() => toggleAudioFile(index)}
-                    />
-                    <View style={styles.audioInfo}>
-                      <Text style={styles.audioName}>{item.name}</Text>
-                      <Text style={styles.audioSize}>
-                        {(item.size / 1024 / 1024).toFixed(1)} MB
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                )}
-                keyExtractor={(item, index) => index.toString()}
-              />
-            )}
-          </View>
-        )}
-
-      </View>
-
-      {/* Bouton Exporter */}
+  const renderConversationItem = ({ item }) => (
+    <View style={styles.conversationItem}>
       <TouchableOpacity
-        style={[
-          styles.exportButton,
-          selectedConversations.size === 0 && styles.exportButtonDisabled,
-        ]}
-        onPress={handleExport}
-        disabled={selectedConversations.size === 0}
-        activeOpacity={0.8}
+        style={styles.checkboxTouchArea}
+        onPress={() => toggleConversation(item.id)}
+        activeOpacity={0.6}
       >
-        <Text style={styles.exportButtonText}>Exporter</Text>
+        <Checkbox
+          value={selectedConversations.has(item.id)}
+          onValueChange={() => toggleConversation(item.id)}
+        />
       </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.conversationTouchArea}
+        onPress={() => openConversationDetail(item)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.conversationInfo}>
+          <Text style={styles.conversationName}>
+            {item.name || item.address}
+          </Text>
+          <Text style={styles.conversationCount}>
+            {item.filteredCount !== undefined ? item.filteredCount : item.messages.length} messages dans la période (total: {item.totalCount || item.messages.length})
+          </Text>
+        </View>
+        <Text style={styles.arrowIcon}>›</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  return (
+    <View style={styles.container}>
+      <FlatList
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.content}
+        data={displayedConversations}
+        renderItem={renderConversationItem}
+        keyExtractor={(item) => item.id}
+        showsVerticalScrollIndicator={true}
+        ListHeaderComponent={
+          <>
+            <StatusBar barStyle="dark-content" backgroundColor="#e5e7eb" />
+
+            <Text style={styles.title}>Exporter mes SMS</Text>
+
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Plage de dates</Text>
+
+              <View style={styles.dateRow}>
+                <View style={styles.dateColumn}>
+                  <Text style={styles.dateLabel}>Du</Text>
+                  <TouchableOpacity
+                    style={styles.dateButton}
+                    onPress={() => {
+                      setTempDate(dateFrom);
+                      setTempDay(String(dateFrom.getDate()).padStart(2, '0'));
+                      setTempMonth(String(dateFrom.getMonth() + 1).padStart(2, '0'));
+                      setTempYear(String(dateFrom.getFullYear()));
+                      setEditingDateType('from');
+                      setShowDateFromPicker(true);
+                    }}
+                  >
+                    <Text style={styles.dateButtonText}>
+                      {dateFrom.toLocaleDateString('fr-FR')}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.dateColumn}>
+                  <Text style={styles.dateLabel}>Au</Text>
+                  <TouchableOpacity
+                    style={styles.dateButton}
+                    onPress={() => {
+                      setTempDate(dateTo);
+                      setTempDay(String(dateTo.getDate()).padStart(2, '0'));
+                      setTempMonth(String(dateTo.getMonth() + 1).padStart(2, '0'));
+                      setTempYear(String(dateTo.getFullYear()));
+                      setEditingDateType('to');
+                      setShowDateToPicker(true);
+                    }}
+                  >
+                    <Text style={styles.dateButtonText}>
+                      {dateTo.toLocaleDateString('fr-FR')}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>
+                Conversations ({displayedConversations.length}) • {selectedConversations.size} sélectionnée(s)
+              </Text>
+
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Rechercher un contact..."
+                placeholderTextColor="#9ca3af"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+
+              {displayedConversations.length === 0 && (
+                <View style={{ paddingVertical: 20, justifyContent: 'center', alignItems: 'center' }}>
+                  <Text style={{ color: '#6b7280', textAlign: 'center' }}>
+                    Aucun SMS trouvé.
+                    {'\n'}
+                    Vérifiez que la permission SMS est accordée dans Réglages {'>'} Applications {'>'} Chatbook Export {'>'} Permissions {'>'} SMS.
+                  </Text>
+                </View>
+              )}
+            </View>
+          </>
+        }
+        ListFooterComponent={
+          <>
+            {/* Choix des médias */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Contenu à inclure</Text>
+
+              <TouchableOpacity
+                style={styles.mediaOption}
+                onPress={() => setIncludeText(!includeText)}
+              >
+                <Checkbox value={includeText} onValueChange={setIncludeText} />
+                <Text style={styles.mediaLabel}>Messages texte</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.mediaOption}
+                onPress={() => setIncludeImages(!includeImages)}
+              >
+                <Checkbox value={includeImages} onValueChange={setIncludeImages} />
+                <Text style={styles.mediaLabel}>Photos/Images</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.mediaOption}
+                onPress={() => setIncludeAudio(!includeAudio)}
+              >
+                <Checkbox value={includeAudio} onValueChange={setIncludeAudio} />
+                <Text style={styles.mediaLabel}>Vocapsules et audios</Text>
+                {includeAudio && (
+                  <Text style={styles.audioLimit}>Max 500 MB</Text>
+                )}
+              </TouchableOpacity>
+
+              {includeAudio && audioFiles.length > 0 && (
+                <View style={styles.audioSection}>
+                  {/* Jauge de poids */}
+                  <View style={styles.audioGauge}>
+                    <View style={styles.gaugeLabel}>
+                      <Text style={styles.gaugeLabelText}>
+                        {(audioTotalSize / 1024 / 1024).toFixed(1)} MB / 500 MB
+                      </Text>
+                      {audioTotalSize > AUDIO_MAX_SIZE && (
+                        <Text style={styles.gaugeWarning}>⚠️ Dépassement</Text>
+                      )}
+                    </View>
+                    <View style={styles.gaugeBar}>
+                      <View
+                        style={[
+                          styles.gaugeFill,
+                          {
+                            width: `${Math.min((audioTotalSize / AUDIO_MAX_SIZE) * 100, 100)}%`,
+                            backgroundColor:
+                              audioTotalSize > AUDIO_MAX_SIZE ? '#ef4444' : '#34d399',
+                          },
+                        ]}
+                      />
+                    </View>
+                  </View>
+
+                  {/* Liste des audios */}
+                  <TouchableOpacity
+                    style={styles.audioListToggle}
+                    onPress={() => setShowAudioList(!showAudioList)}
+                  >
+                    <Text style={styles.audioListToggleText}>
+                      {showAudioList ? '▼' : '▶'} Détail des audios ({audioFiles.length})
+                    </Text>
+                  </TouchableOpacity>
+
+                  {showAudioList && (
+                    <View>
+                      {audioFiles.map((item, index) => (
+                        <TouchableOpacity
+                          key={String(index)}
+                          style={styles.audioItem}
+                          onPress={() => toggleAudioFile(index)}
+                        >
+                          <Checkbox
+                            value={item.selected}
+                            onValueChange={() => toggleAudioFile(index)}
+                          />
+                          <View style={styles.audioInfo}>
+                            <Text style={styles.audioName}>{item.name}</Text>
+                            <Text style={styles.audioSize}>
+                              {(item.size / 1024 / 1024).toFixed(1)} MB
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              )}
+            </View>
+          </>
+        }
+      />
+
+      <View style={styles.exportBar}>
+        <View style={styles.exportBarSummary}>
+          <Text style={styles.exportBarSummaryText}>
+            {selectedConversations.size} conversation{selectedConversations.size > 1 ? 's' : ''} sélectionnée{selectedConversations.size > 1 ? 's' : ''}
+          </Text>
+        </View>
+
+        {/* Bouton Exporter */}
+        <TouchableOpacity
+          style={[
+            styles.exportButton,
+            styles.exportButtonFixed,
+            selectedConversations.size === 0 && styles.exportButtonDisabled,
+          ]}
+          onPress={handleExport}
+          disabled={selectedConversations.size === 0}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.exportButtonText}>Exporter</Text>
+        </TouchableOpacity>
+      </View>
 
       {/* Modal détail conversation */}
       <Modal
@@ -712,12 +927,43 @@ export default function ExportSMSScreen() {
               <Text style={styles.modalHeaderSubtitle}>
                 {selectedConversation.messages.filter(m => m.type === 'sent').length} envoyés • {selectedConversation.messages.filter(m => m.type === 'received').length} reçus
               </Text>
+              {!!selectedConversation.mmsMediaSummary && (
+                <Text style={styles.modalHeaderSubtitle}>
+                  🖼️ {selectedConversation.mmsMediaSummary.imageCount || 0} • 🔊 {selectedConversation.mmsMediaSummary.audioCount || 0} (MMS: {selectedConversation.mmsMediaSummary.mmsMessageCount || 0})
+                </Text>
+              )}
+              {!!selectedConversation.needsDefaultSmsApp && (
+                <View style={{ marginTop: 8 }}>
+                  <Text style={styles.modalHeaderSubtitle}>
+                    Pour lire les photos MMS sur certains Samsung, l’app doit être définie comme application SMS par défaut.
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.validateButton, { marginTop: 8, paddingVertical: 10 }]}
+                    onPress={async () => {
+                      try {
+                        const mmsReader = NativeModules?.MmsReader;
+                        if (!mmsReader?.requestDefaultSmsApp) {
+                          Alert.alert('Non disponible', "Impossible d'ouvrir la demande d'app SMS par défaut sur cet appareil.");
+                          return;
+                        }
+                        await mmsReader.requestDefaultSmsApp();
+                        Alert.alert('Action requise', "Choisis Chatbook Export comme app SMS par défaut, puis reviens ici et rouvre la conversation.");
+                      } catch (e) {
+                        Alert.alert('Erreur', e?.message || 'Impossible de demander l’app SMS par défaut');
+                      }
+                    }}
+                  >
+                    <Text style={styles.validateButtonText}>Définir comme app SMS par défaut</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
               <Text style={[styles.modalHeaderSubtitle, { fontSize: 12, marginTop: 4 }]}>
                 📅 {dateFrom.toLocaleDateString('fr-FR')} - {dateTo.toLocaleDateString('fr-FR')}
               </Text>
             </View>
             <FlatList
               data={selectedConversation.messages}
+              extraData={selectedMessagesInConv}
               renderItem={({ item }) => (
                 <TouchableOpacity
                   style={styles.messageItem}
@@ -727,7 +973,31 @@ export default function ExportSMSScreen() {
                     value={selectedMessagesInConv.has(item.id)}
                     onValueChange={() => toggleMessageInConv(item.id)}
                   />
-                  <View style={styles.messageContent}>
+                  <View style={[
+                    styles.messageContent,
+                    item.isMms && styles.mmsMessageHighlight
+                  ]}>
+                    {item.isMms && (
+                      <Text style={styles.mmsLabel}>
+                        {item.parts?.some(p => p.type === 'audio') ? '🔊 AUDIO' : '🖼️ PHOTO'} ({new Date(item.date).toLocaleDateString('fr-FR')})
+                      </Text>
+                    )}
+                    {item.isMms && item.parts && item.parts.map((part, pIdx) => (
+                      <View key={pIdx} style={styles.mmsPartContainer}>
+                        {part.type === 'image' && (
+                          <Image 
+                            source={{ uri: part.uri }} 
+                            style={styles.mmsImagePreview} 
+                            resizeMode="cover"
+                          />
+                        )}
+                        {part.type === 'audio' && (
+                          <View style={styles.mmsAudioPlaceholder}>
+                            <Text style={styles.mmsAudioText}>🔊 Message vocal</Text>
+                          </View>
+                        )}
+                      </View>
+                    ))}
                     <Text style={styles.messageBody}>{item.body || '(vide)'}</Text>
                     <Text style={styles.messageDate}>
                       {new Date(item.date).toLocaleString('fr-FR')}
@@ -784,15 +1054,18 @@ export default function ExportSMSScreen() {
                 <Text style={styles.datePickerLabel}>Jour</Text>
                 <TextInput
                   style={styles.datePickerInput}
-                  keyboardType="number-pad"
+                  ref={dayInputRef}
+                  autoFocus={true}
+                  keyboardType="numeric"
                   maxLength={2}
-                  value={tempDate.getDate().toString()}
+                  value={tempDay}
                   onChangeText={(text) => {
-                    const day = parseInt(text) || 1;
-                    const newDate = new Date(tempDate);
-                    newDate.setDate(Math.min(Math.max(day, 1), 31));
-                    setTempDate(newDate);
+                    const clean = (text || '').replace(/[^0-9]/g, '');
+                    setTempDay(clean);
                   }}
+                  returnKeyType="next"
+                  blurOnSubmit={false}
+                  onSubmitEditing={() => monthInputRef.current?.focus?.()}
                 />
               </View>
 
@@ -800,15 +1073,17 @@ export default function ExportSMSScreen() {
                 <Text style={styles.datePickerLabel}>Mois</Text>
                 <TextInput
                   style={styles.datePickerInput}
-                  keyboardType="number-pad"
+                  ref={monthInputRef}
+                  keyboardType="numeric"
                   maxLength={2}
-                  value={(tempDate.getMonth() + 1).toString()}
+                  value={tempMonth}
                   onChangeText={(text) => {
-                    const month = parseInt(text) || 1;
-                    const newDate = new Date(tempDate);
-                    newDate.setMonth(Math.min(Math.max(month - 1, 0), 11));
-                    setTempDate(newDate);
+                    const clean = (text || '').replace(/[^0-9]/g, '');
+                    setTempMonth(clean);
                   }}
+                  returnKeyType="next"
+                  blurOnSubmit={false}
+                  onSubmitEditing={() => yearInputRef.current?.focus?.()}
                 />
               </View>
 
@@ -816,15 +1091,15 @@ export default function ExportSMSScreen() {
                 <Text style={styles.datePickerLabel}>Année</Text>
                 <TextInput
                   style={styles.datePickerInput}
-                  keyboardType="number-pad"
+                  ref={yearInputRef}
+                  keyboardType="numeric"
                   maxLength={4}
-                  value={tempDate.getFullYear().toString()}
+                  value={tempYear}
                   onChangeText={(text) => {
-                    const year = parseInt(text) || 2024;
-                    const newDate = new Date(tempDate);
-                    newDate.setFullYear(year);
-                    setTempDate(newDate);
+                    const clean = (text || '').replace(/[^0-9]/g, '');
+                    setTempYear(clean);
                   }}
+                  returnKeyType="done"
                 />
               </View>
             </View>
@@ -843,8 +1118,22 @@ export default function ExportSMSScreen() {
               <TouchableOpacity
                 style={[styles.datePickerButton, styles.datePickerConfirmButton]}
                 onPress={() => {
-                  // Créer une nouvelle instance de Date pour forcer la mise à jour
+                  const parsedYear = parseInt(tempYear, 10);
+                  const parsedMonth = parseInt(tempMonth, 10);
+                  const parsedDay = parseInt(tempDay, 10);
+
+                  const year = Number.isFinite(parsedYear) ? parsedYear : new Date(tempDate).getFullYear();
+                  const month = Number.isFinite(parsedMonth) ? parsedMonth : new Date(tempDate).getMonth() + 1;
+
+                  const safeMonth = Math.min(Math.max(month, 1), 12);
+                  const maxDay = new Date(year, safeMonth, 0).getDate();
+                  const day = Number.isFinite(parsedDay) ? Math.min(Math.max(parsedDay, 1), maxDay) : Math.min(new Date(tempDate).getDate(), maxDay);
+
                   const newDate = new Date(tempDate);
+                  newDate.setFullYear(year);
+                  newDate.setMonth(safeMonth - 1);
+                  newDate.setDate(day);
+
                   if (editingDateType === 'from') {
                     setDateFrom(newDate);
                     console.log('📅 Date début mise à jour:', newDate.toLocaleDateString('fr-FR'));
@@ -896,7 +1185,7 @@ export default function ExportSMSScreen() {
           </View>
         </View>
       </Modal>
-    </ScrollView>
+    </View>
   );
 }
 
@@ -907,7 +1196,7 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 20,
-    paddingBottom: 40,
+    paddingBottom: 140,
   },
   centerContainer: {
     flex: 1,
@@ -947,12 +1236,12 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   conversationListContainer: {
-    height: 280,
+    height: 200,
     backgroundColor: '#f9fafb',
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#d1d5db',
-    padding: 8,
+    marginBottom: 12,
   },
   hint: {
     fontSize: 14,
@@ -1078,6 +1367,11 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 6,
   },
+  exportButtonFixed: {
+    marginTop: 0,
+    flex: 1,
+    marginLeft: 12,
+  },
   exportButtonDisabled: {
     opacity: 0.5,
   },
@@ -1085,6 +1379,27 @@ const styles = StyleSheet.create({
     color: '#065f46',
     fontSize: 18,
     fontWeight: '700',
+  },
+  exportBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#e5e7eb',
+    borderTopWidth: 1,
+    borderTopColor: '#d1d5db',
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  exportBarSummary: {
+    minWidth: 120,
+  },
+  exportBarSummaryText: {
+    fontSize: 12,
+    color: '#374151',
+    fontWeight: '600',
   },
   dateRow: {
     flexDirection: 'row',
@@ -1292,6 +1607,45 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     color: '#1f2937',
+  },
+  mmsMessageHighlight: {
+    backgroundColor: '#fffbeb', // Jaune très clair
+    borderRadius: 12,
+    padding: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#ef4444', // Rouge pour bien mettre en évidence (préférence utilisateur jaune/rouge)
+    borderWidth: 1,
+    borderColor: '#fef3c7',
+  },
+  mmsLabel: {
+    fontWeight: 'bold',
+    color: '#b45309', // Marron/Ambre foncé
+    marginBottom: 4,
+    fontSize: 12,
+  },
+  mmsPartContainer: {
+    marginVertical: 8,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  mmsImagePreview: {
+    width: '100%',
+    height: 200,
+    backgroundColor: '#000',
+  },
+  mmsAudioPlaceholder: {
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#d1fae5',
+  },
+  mmsAudioText: {
+    fontSize: 14,
+    color: '#065f46',
+    fontWeight: '500',
   },
   modalFooter: {
     padding: 16,

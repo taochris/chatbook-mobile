@@ -162,7 +162,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
   },
   featureCard: {
-    backgroundColor: '#ffffff',
+    backgroundColor: 'transparent',
     borderRadius: 16,
     padding: 18,
     marginBottom: 14,

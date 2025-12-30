@@ -4,6 +4,7 @@
  */
 
 import { firebaseConfig } from './firebaseConfig';
+import { NativeModules } from 'react-native';
 
 // Génère un code aléatoire à 6 caractères (lettres majuscules et chiffres)
 function generateCode() {
@@ -68,6 +69,144 @@ async function generateUniqueCode() {
 }
 
 /**
+ * Upload un fichier vers Firebase Storage via REST API
+ * @param {string} localUri - URI locale du fichier (content:// ou file://)
+ * @param {string} storagePath - Chemin de destination dans le bucket Storage
+ * @returns {Promise<string>} - URL publique du fichier
+ */
+async function uploadToStorage(localUri, storagePath) {
+  try {
+    const bucket = firebaseConfig.storageBucket;
+    // URL REST pour l'upload simple (media)
+    const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?name=${encodeURIComponent(storagePath)}`;
+
+    console.log('[mobileExportService] uploadToStorage start', {
+      storagePath,
+      localUri,
+      bucket,
+    });
+
+    const originalUri = localUri;
+
+    // Hermes/React Native: fetch(content://...) peut échouer avec status=0 et "Failed to construct Response"
+    if (typeof localUri === 'string' && localUri.startsWith('content://')) {
+      const mmsReader = NativeModules?.MmsReader;
+      if (!mmsReader?.copyContentUriToCache) {
+        throw new Error('copyContentUriToCache non disponible (module natif MmsReader)');
+      }
+
+      console.log('[mobileExportService] uploadToStorage content:// detected, copying to cache', {
+        storagePath,
+        localUri,
+      });
+
+      const copied = await mmsReader.copyContentUriToCache(localUri);
+      const fileUri = copied?.fileUri;
+      const copiedMimeType = copied?.mimeType;
+      const copiedSize = copied?.size;
+
+      console.log('[mobileExportService] uploadToStorage copyContentUriToCache result', {
+        storagePath,
+        originalUri,
+        fileUri,
+        copiedMimeType,
+        copiedSize,
+      });
+
+      if (typeof fileUri === 'string' && fileUri.length > 0) {
+        localUri = fileUri;
+      }
+    }
+
+    let response;
+    try {
+      // En React Native, on utilise fetch avec un blob pour les content:// URIs
+      response = await fetch(localUri);
+    } catch (e) {
+      console.error('[mobileExportService] uploadToStorage fetch(localUri) threw', {
+        storagePath,
+        localUri,
+        originalUri,
+        message: e?.message,
+        name: e?.name,
+      });
+      throw e;
+    }
+
+    console.log('[mobileExportService] uploadToStorage fetch(localUri) response', {
+      storagePath,
+      localUri,
+      originalUri,
+      ok: response?.ok,
+      status: response?.status,
+      statusText: response?.statusText,
+      contentType: response?.headers?.get?.('content-type'),
+    });
+
+    let blob;
+    try {
+      blob = await response.blob();
+    } catch (e) {
+      console.error('[mobileExportService] uploadToStorage response.blob() threw', {
+        storagePath,
+        localUri,
+        message: e?.message,
+        name: e?.name,
+      });
+      throw e;
+    }
+
+    console.log('[mobileExportService] uploadToStorage blob ready', {
+      storagePath,
+      localUri,
+      blobType: blob?.type,
+      blobSize: blob?.size,
+    });
+
+    const uploadResponse = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': blob.type || 'application/octet-stream'
+      },
+      body: blob
+    });
+
+    console.log('[mobileExportService] uploadToStorage uploadResponse', {
+      storagePath,
+      ok: uploadResponse?.ok,
+      status: uploadResponse?.status,
+      statusText: uploadResponse?.statusText,
+    });
+
+    if (!uploadResponse.ok) {
+      const error = await uploadResponse.text();
+      throw new Error(`Erreur Storage: ${uploadResponse.status} - ${error}`);
+    }
+
+    const data = await uploadResponse.json();
+    console.log('[mobileExportService] uploadToStorage response JSON:', JSON.stringify(data));
+
+    // Le token peut être à la racine ou dans metadata selon l'API REST
+    const downloadToken = data.downloadTokens || (data.metadata && data.metadata.downloadTokens);
+    
+    if (!downloadToken) {
+      console.warn('[mobileExportService] Aucun downloadToken trouvé dans la réponse Storage');
+    }
+
+    // URL publique formatée (nécessite le token pour lecture sans auth)
+    // Note: On utilise %2F pour les dossiers dans le chemin de l'objet
+    const encodedPath = encodeURIComponent(storagePath);
+    const finalUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedPath}?alt=media&token=${downloadToken || ''}`;
+    
+    console.log('[mobileExportService] uploadToStorage final URL:', finalUrl);
+    return finalUrl;
+  } catch (error) {
+    console.error('[mobileExportService] Échec upload Storage:', error);
+    throw error;
+  }
+}
+
+/**
  * Upload les données d'export vers Firebase
  * @param {Object} exportData - Les données à exporter
  * @param {Array} exportData.conversations - Les conversations sélectionnées
@@ -78,7 +217,12 @@ async function generateUniqueCode() {
  */
 export async function uploadExportData(exportData) {
   try {
-    console.log('[mobileExportService] Début de l\'upload...');
+    console.log('[mobileExportService] Début de l\'upload...', {
+      conversationCount: exportData?.conversations?.length,
+      options: exportData?.options,
+      dateFrom: exportData?.dateFrom?.toISOString?.(),
+      dateTo: exportData?.dateTo?.toISOString?.(),
+    });
     
     // Générer un code unique
     const code = await generateUniqueCode();
@@ -86,29 +230,101 @@ export async function uploadExportData(exportData) {
 
     // Préparer les messages pour l'export
     const messages = [];
+    const mediaToUpload = []; // Liste des médias à uploader en parallèle
     
     for (const conv of exportData.conversations) {
-      // Filtrer les messages selon la période
+      console.log('[mobileExportService] Conversation', {
+        id: conv?.id,
+        name: conv?.name,
+        address: conv?.address,
+        messagesCount: conv?.messages?.length,
+        selectedMessageIdsCount: conv?.selectedMessageIds?.length,
+      });
+
+      // Les messages sélectionnés dans l'UI (ID passés dans conversations)
+      // Note: On filtre par rapport à la sélection si disponible, sinon par date
+      const selectedIds = conv.selectedMessageIds ? new Set(conv.selectedMessageIds) : null;
+
       const filteredMessages = conv.messages.filter(msg => {
+        if (selectedIds) return selectedIds.has(msg.id);
         return msg.date >= exportData.dateFrom.getTime() && 
                msg.date <= exportData.dateTo.getTime();
       });
 
-      // Formater les messages pour le web (format WhatsApp-compatible)
+      // Formater les messages pour le web
       for (const msg of filteredMessages) {
-        const messageText = msg.body || '';
-        messages.push({
+        const messageObj = {
           id: msg.id,
-          body: messageText,
-          content: messageText, // Le web cherche 'content' pour l'affichage
-          text: messageText, // Fallback
+          body: msg.body || '',
+          content: msg.body || '',
           timestamp: msg.date,
           sender: msg.type === 'received' ? conv.name || conv.address : 'Moi',
-          type: 'text',
+          type: msg.isMms ? 'mms' : 'text',
           conversationName: conv.name || conv.address,
           conversationId: conv.id,
-        });
+        };
+
+        // Gérer les médias MMS
+        if (msg.isMms && msg.parts) {
+          messageObj.parts = [];
+          for (let i = 0; i < msg.parts.length; i++) {
+            const part = msg.parts[i];
+            const isImage = part.type === 'image' && exportData.options.includeImages;
+            const isAudio = part.type === 'audio' && exportData.options.includeAudio;
+
+            if (isImage || isAudio) {
+              const fileExt = part.type === 'image' ? 'jpg' : 'amr';
+              const storagePath = `mobile-imports/${code}/${msg.id}_part${i}.${fileExt}`;
+
+              console.log('[mobileExportService] Queue media upload', {
+                storagePath,
+                localUri: part?.uri,
+                partType: part?.type,
+                mimeType: part?.mimeType,
+                msgId: msg?.id,
+                convId: conv?.id,
+              });
+              
+              // On met un placeholder en attendant l'URL Firebase
+              messageObj.parts.push({
+                type: part.type,
+                mimeType: part.mimeType,
+                fileName: `${msg.id}_part${i}.${fileExt}`
+              });
+
+              mediaToUpload.push({
+                localUri: part.uri,
+                storagePath,
+                messageRef: messageObj,
+                partIndex: messageObj.parts.length - 1,
+                mimeType: part.mimeType,
+                type: part.type
+              });
+            }
+          }
+        }
+        messages.push(messageObj);
       }
+    }
+
+    if (messages.length === 0) {
+      throw new Error('Aucun message à exporter dans la période sélectionnée');
+    }
+
+    // 1) Uploader les médias vers Storage en parallèle
+    if (mediaToUpload.length > 0) {
+      console.log(`[mobileExportService] Upload de ${mediaToUpload.length} médias...`);
+      await Promise.all(mediaToUpload.map(async (item) => {
+        try {
+          const downloadUrl = await uploadToStorage(item.localUri, item.storagePath);
+          // Mettre à jour la référence du message avec l'URL finale
+          item.messageRef.parts[item.partIndex].url = downloadUrl;
+          item.messageRef.parts[item.partIndex].firebasePath = item.storagePath;
+        } catch (e) {
+          console.warn(`[mobileExportService] Échec upload média ${item.storagePath}:`, e);
+          item.messageRef.parts[item.partIndex].error = "Échec upload Storage";
+        }
+      }));
     }
 
     // Préparer les données complètes
@@ -118,6 +334,7 @@ export async function uploadExportData(exportData) {
       metadata: {
         exportDate: new Date().toISOString(),
         messageCount: messages.length,
+        mediaCount: mediaToUpload.length,
         conversationCount: exportData.conversations.length,
         conversationNames: exportData.conversations.map(c => c.name || c.address).join(', '),
         dateFrom: exportData.dateFrom.toISOString(),
@@ -142,6 +359,7 @@ export async function uploadExportData(exportData) {
 
     // 1) Écrire d'abord les métadonnées (nécessaire pour autoriser la lecture du JSON via les règles)
     const dbUrl = `${firebaseConfig.databaseURL}/mobile-imports/${code}.json`;
+    console.log('[mobileExportService] RTDB meta write', { dbUrl });
     const metaResponse = await fetch(dbUrl, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -162,6 +380,11 @@ export async function uploadExportData(exportData) {
 
     // 2) Écrire le JSON des données ensuite
     console.log('[mobileExportService] Upload vers:', dataUrl);
+    console.log('[mobileExportService] RTDB data write size', {
+      approxBytes: JSON.stringify(data).length,
+      messageCount: messages.length,
+      mediaCount: mediaToUpload.length,
+    });
     const dataResponse = await fetch(dataUrl, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
