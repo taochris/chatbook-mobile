@@ -16,6 +16,8 @@ import {
   Image,
 } from 'react-native';
 import SmsAndroid from 'react-native-get-sms-android';
+import Sound from 'react-native-sound';
+import RNFS from 'react-native-fs';
 
 export default function ExportSMSScreen() {
   const [conversations, setConversations] = useState([]);
@@ -43,6 +45,9 @@ export default function ExportSMSScreen() {
   const [selectedMessagesInConv, setSelectedMessagesInConv] = useState(new Set());
   const [filterKey, setFilterKey] = useState(0); // Force refresh du filtrage
 
+  const soundRef = useRef(null);
+  const [playingAudioKey, setPlayingAudioKey] = useState(null);
+
   const dayInputRef = useRef(null);
   const monthInputRef = useRef(null);
   const yearInputRef = useRef(null);
@@ -52,6 +57,181 @@ export default function ExportSMSScreen() {
   useEffect(() => {
     requestSMSPermission();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      try {
+        if (soundRef.current) {
+          const s = soundRef.current;
+          soundRef.current = null;
+          try {
+            s.stop(() => {
+              try {
+                s.release();
+              } catch (_) {}
+            });
+          } catch (_) {
+            try {
+              s.release();
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    };
+  }, []);
+
+  const playOrToggleAudioPart = async (messageId, part, partIndex) => {
+    try {
+      const audioKey = `${messageId}_part${partIndex}`;
+
+      const stopAndReleaseCurrent = async () => {
+        const current = soundRef.current;
+        if (!current) return;
+        soundRef.current = null;
+        await new Promise((resolve) => {
+          try {
+            current.stop(() => {
+              try {
+                current.release();
+              } catch (_) {}
+              resolve();
+            });
+          } catch (_) {
+            try {
+              current.release();
+            } catch (_) {}
+            resolve();
+          }
+        });
+      };
+
+      if (playingAudioKey === audioKey && soundRef.current) {
+        await stopAndReleaseCurrent();
+        setPlayingAudioKey(null);
+        return;
+      }
+
+      // Stop previous
+      await stopAndReleaseCurrent();
+
+      const mmsReader = NativeModules?.MmsReader;
+      let uri = part?.uri;
+      if (!uri) return;
+
+      console.log('[audio] playOrToggleAudioPart', {
+        messageId,
+        partIndex,
+        audioKey,
+        uri,
+        partType: part?.type,
+      });
+
+      // Convert content:// to file:// (cache) for Sound
+      if (typeof uri === 'string' && uri.startsWith('content://')) {
+        if (!mmsReader?.copyContentUriToCache) {
+          Alert.alert('Audio', 'Lecture audio indisponible (copyContentUriToCache manquant)');
+          return;
+        }
+
+        let copied;
+        try {
+          copied = await mmsReader.copyContentUriToCache(uri);
+        } catch (e) {
+          console.warn('[audio] copyContentUriToCache failed', e);
+          Alert.alert(
+            'Audio',
+            `Impossible de lire ce message vocal (copie du fichier échouée).\n\n${e?.message || e}`
+          );
+          return;
+        }
+
+        const fileUri = copied?.fileUri;
+        const copiedMimeType = copied?.mimeType;
+        const copiedSize = copied?.size;
+
+        console.log('[audio] copyContentUriToCache result', {
+          fileUri,
+          copiedMimeType,
+          copiedSize,
+        });
+
+        if (!fileUri) {
+          Alert.alert('Audio', "Impossible de lire ce message vocal (fichier introuvable après copie).");
+          return;
+        }
+
+        if (typeof copiedSize === 'number' && copiedSize <= 0) {
+          Alert.alert('Audio', "Impossible de lire ce message vocal (fichier vide après copie).");
+          return;
+        }
+
+        // react-native-sound peut échouer si le fichier n'a pas d'extension reconnue (ex: .bin)
+        // On renomme le fichier selon le mimeType si possible.
+        try {
+          const guessExtFromMime = (mime) => {
+            const m = String(mime || '').toLowerCase();
+            if (m === 'audio/amr') return 'amr';
+            if (m === 'audio/3gpp' || m === 'audio/3gp') return '3gp';
+            if (m === 'audio/ogg') return 'ogg';
+            if (m === 'audio/opus') return 'opus';
+            if (m === 'audio/mpeg' || m === 'audio/mp3') return 'mp3';
+            if (m === 'audio/mp4' || m === 'audio/m4a') return 'm4a';
+            return null;
+          };
+
+          const ext = guessExtFromMime(copiedMimeType);
+          if (ext && typeof fileUri === 'string' && fileUri.toLowerCase().endsWith('.bin')) {
+            const filePath = fileUri.startsWith('file://') ? fileUri.slice('file://'.length) : fileUri;
+            const newFilePath = filePath.replace(/\.bin$/i, `.${ext}`);
+            console.log('[audio] renaming cache file for Sound', { filePath, newFilePath, copiedMimeType });
+            await RNFS.moveFile(filePath, newFilePath);
+            uri = `file://${newFilePath}`;
+          } else {
+            uri = fileUri;
+          }
+        } catch (e) {
+          console.warn('[audio] rename cache file failed, fallback to original fileUri', e);
+          uri = fileUri;
+        }
+      }
+
+      const path = String(uri).startsWith('file://') ? String(uri).slice('file://'.length) : String(uri);
+
+      console.log('[audio] resolved path', { path });
+
+      setPlayingAudioKey(audioKey);
+      Sound.setCategory('Playback');
+      const s = new Sound(path, null, (error) => {
+        if (error) {
+          console.warn('[audio] Sound load error:', error);
+          Alert.alert(
+            'Audio',
+            `Impossible de charger ce message vocal.\n\n${error?.message || JSON.stringify(error)}`
+          );
+          setPlayingAudioKey(null);
+          return;
+        }
+        soundRef.current = s;
+        s.play((success) => {
+          setPlayingAudioKey(null);
+          try {
+            s.release();
+          } catch (_) {}
+          if (soundRef.current === s) {
+            soundRef.current = null;
+          }
+          if (!success) {
+            console.warn('[audio] Sound playback failed');
+            Alert.alert('Audio', 'La lecture a échoué sur ce téléphone (format audio non supporté ?)');
+          }
+        });
+      });
+    } catch (e) {
+      console.warn('[audio] Audio play error:', e);
+      Alert.alert('Audio', `Erreur lecture audio.\n\n${e?.message || e}`);
+      setPlayingAudioKey(null);
+    }
+  };
 
   const requestSMSPermission = async () => {
     if (Platform.OS === 'android') {
@@ -135,13 +315,14 @@ export default function ExportSMSScreen() {
 
           console.log('📱 SMS récupérés - Inbox:', inbox.length, 'Sent:', sent.length, 'Total:', all.length);
 
-          // Regrouper par address (numéro de téléphone)
+          // Regrouper par thread_id (plus fiable) avec fallback sur address
           const map = new Map();
           const seenMessageIds = new Set(); // Pour éviter les doublons
           
           for (const m of all) {
             const rawAddress = (m?.address || '').trim();
-            if (!rawAddress) continue;
+            const threadId = (m?.thread_id ?? m?.threadId ?? m?.thread ?? null);
+            const threadKey = (threadId != null && threadId !== '') ? `thread_${threadId}` : null;
             
             // Créer un ID unique basé sur plusieurs critères pour éviter les doublons
             const messageId = m._id || `${m.date}-${m.address}-${m.type}-${(m.body || '').substring(0, 50)}`;
@@ -154,12 +335,16 @@ export default function ExportSMSScreen() {
             seenMessageIds.add(messageId);
             
             // Normaliser pour regroupement: enlever espaces, tirets, parenthèses
-            const normalizedNumber = rawAddress.replace(/[\s\-\(\)]/g, '');
-            
-            // Utiliser le numéro normalisé comme clé unique
-            const existing = map.get(normalizedNumber) || {
-              id: normalizedNumber,
-              address: rawAddress, // Garder le format original pour l'affichage
+            const normalizedNumber = rawAddress ? rawAddress.replace(/[\s\-\(\)]/g, '') : '';
+
+            // Clé de conversation: thread_id si dispo, sinon numéro normalisé (si dispo)
+            const convKey = threadKey || (normalizedNumber ? `addr_${normalizedNumber}` : null);
+            if (!convKey) continue;
+
+            const existing = map.get(convKey) || {
+              id: convKey,
+              threadId: threadId != null ? threadId : null,
+              address: rawAddress || null, // Peut être null sur certains devices/threads
               name: null,
               messages: [],
               lastMessage: '',
@@ -167,20 +352,25 @@ export default function ExportSMSScreen() {
               audioCount: 0,
               imageCount: 0,
             };
+
+            // Si l'address n'était pas encore connue pour ce thread, tenter de la remplir
+            if (!existing.address && rawAddress) {
+              existing.address = rawAddress;
+            }
             
             existing.messages.push({
               id: messageId,
               body: m?.body || '',
               date: m?.date || 0,
               type: m?.type === 1 ? 'received' : 'sent',
-              address: rawAddress,
+              address: rawAddress || '',
             });
             
             if ((m?.date || 0) > existing.lastDate) {
               existing.lastDate = m.date;
               existing.lastMessage = m?.body || '';
             }
-            map.set(normalizedNumber, existing);
+            map.set(convKey, existing);
           }
 
           // Trier les messages de chaque conversation par date
@@ -233,14 +423,55 @@ export default function ExportSMSScreen() {
     try {
       const Contacts = require('react-native-contacts').default;
 
+      const normalizePhoneDigits = (value) => {
+        const digits = (value || '').toString().replace(/\D/g, '');
+        if (!digits) return '';
+        // Handle international prefix 00...
+        const no00 = digits.startsWith('00') ? digits.slice(2) : digits;
+        // Keep a stable suffix to match between formats (+33..., 0..., spaces, etc.)
+        return no00.length > 10 ? no00.slice(-10) : no00;
+      };
+
+      const phoneKeyVariants = (value) => {
+        const d = normalizePhoneDigits(value);
+        if (!d) return [];
+        const keys = new Set([d]);
+        if (d.length >= 9) keys.add(d.slice(-9));
+        if (d.length >= 8) keys.add(d.slice(-8));
+        return Array.from(keys);
+      };
+
       // Demander la permission si nécessaire
       const permission = await Contacts.checkPermission();
-      if (permission === 'undefined') {
-        await Contacts.requestPermission();
+      console.log(`📱 Contacts permission (check): ${permission}`);
+      if (permission !== 'authorized') {
+        const requested = await Contacts.requestPermission();
+        console.log(`📱 Contacts permission (request): ${requested}`);
+        if (requested !== 'authorized') {
+          console.warn('📱 Permission contacts non accordée; noms non résolus.');
+          return;
+        }
       }
 
       // Récupérer tous les contacts
-      const contacts = await Contacts.getAll();
+      console.log('📱 Tentative de récupération des contacts...');
+      const getAllFn = Contacts.getAllWithoutPhotos ? Contacts.getAllWithoutPhotos.bind(Contacts) : Contacts.getAll.bind(Contacts);
+      let contacts = await getAllFn();
+
+      // Retry léger: sur certains devices, le 1er appel peut retourner vide juste après un cold start
+      if (!Array.isArray(contacts) || contacts.length === 0) {
+        console.warn('📱 Contacts vides au 1er appel; retry...');
+        await new Promise((r) => setTimeout(r, 350));
+        contacts = await getAllFn();
+      }
+      console.log(`📱 Nombre de contacts récupérés: ${contacts.length}`);
+
+      if (contacts.length > 0) {
+        console.log('📱 Exemple de premier contact:', JSON.stringify({
+          displayName: contacts[0].displayName,
+          phoneNumbers: contacts[0].phoneNumbers
+        }));
+      }
 
       // Créer un mapping numéro normalisé -> contact pour éviter les doublons
       const numberToContact = new Map();
@@ -248,31 +479,38 @@ export default function ExportSMSScreen() {
       for (const contact of contacts) {
         const phoneNumbers = contact.phoneNumbers || [];
         for (const p of phoneNumbers) {
-          const normalized = (p.number || '').replace(/[\s\-\(\)]/g, '');
-          if (normalized) {
-            // Garder le contact avec le nom le plus complet
-            const existingContact = numberToContact.get(normalized);
-            const currentName = contact.displayName || contact.givenName || '';
-            const existingName = existingContact?.displayName || existingContact?.givenName || '';
+          const keys = phoneKeyVariants(p.number);
+          if (keys.length === 0) continue;
 
+          // Garder le contact avec le nom le plus complet
+          const currentName = contact.displayName || contact.givenName || '';
+          for (const key of keys) {
+            const existingContact = numberToContact.get(key);
+            const existingName = existingContact?.displayName || existingContact?.givenName || '';
             if (!existingContact || currentName.length > existingName.length) {
-              numberToContact.set(normalized, contact);
+              numberToContact.set(key, contact);
             }
           }
         }
       }
+      
+      console.log(`📱 Taille du mapping numéros->contacts: ${numberToContact.size}`);
 
       // Résoudre les noms pour chaque conversation
+      let resolvedCount = 0;
       for (const conv of conversations) {
-        const phoneNumber = conv.id; // Déjà normalisé
+        const addressCandidate = conv.address || (Array.isArray(conv.messages) ? (conv.messages.find(m => (m?.address || '').toString().trim())?.address || '') : '');
+        const convKeys = phoneKeyVariants(addressCandidate);
 
-        // Chercher le contact correspondant dans le mapping
-        const contact = numberToContact.get(phoneNumber);
+        // Chercher le contact correspondant dans le mapping (match par suffixe)
+        const contact = convKeys.map(k => numberToContact.get(k)).find(Boolean);
 
         if (contact) {
           conv.name = contact.displayName || contact.givenName || null;
+          resolvedCount++;
         }
       }
+      console.log(`📱 Noms résolus pour ${resolvedCount}/${conversations.length} conversations`);
     } catch (err) {
       console.warn('Impossible de résoudre les noms:', err);
     }
@@ -353,10 +591,15 @@ export default function ExportSMSScreen() {
               mmsDate = mmsDate * 1000;
             }
 
+            const hasAudio = messageParts.some(p => p.type === 'audio');
+            const body = hasAudio
+              ? (it.direction === 'sent' ? '🔊 Message vocal envoyé' : '🔊 Message vocal reçu')
+              : (it.direction === 'sent' ? '🖼️ Photo envoyée' : '🖼️ Photo reçue');
+
             mmsMessages.push({
               id: `mms_${it.mmsId}`,
               mmsId: it.mmsId,
-              body: it.direction === 'sent' ? '🖼️ Photo envoyée' : '🖼️ Photo reçue',
+              body,
               date: mmsDate,
               type: it.direction,
               isMms: true,
@@ -500,6 +743,22 @@ export default function ExportSMSScreen() {
             const fromTs = new Date(dateFrom).setHours(0, 0, 0, 0);
             const toTs = new Date(dateTo).setHours(23, 59, 59, 999);
 
+            const isAudioPart = (mimeType, data) => {
+              const mt = (mimeType || '').toString().toLowerCase();
+              const d = (data || '').toString().toLowerCase();
+              return (
+                mt.startsWith('audio/') ||
+                mt === 'video/3gpp' ||
+                d.endsWith('.amr') ||
+                d.endsWith('.3gp') ||
+                d.endsWith('.m4a') ||
+                d.endsWith('.ogg') ||
+                d.endsWith('.wav') ||
+                d.endsWith('.mp3') ||
+                d.endsWith('.aac')
+              );
+            };
+
             selectedConvsWithMms = await Promise.all(selectedConvs.map(async (conv) => {
               try {
                 const addr = (conv?.address || '').toString();
@@ -516,8 +775,9 @@ export default function ExportSMSScreen() {
 
                   for (const p of parts) {
                     const mime = (p?.mimeType || '').toString();
-                    const isImg = mime.startsWith('image/');
-                    const isAud = mime.startsWith('audio/');
+                    const data = (p?.data || '').toString();
+                    const isImg = mime.toLowerCase().startsWith('image/');
+                    const isAud = isAudioPart(mime, data);
 
                     if ((isImg && !includeImages) || (isAud && !includeAudio)) continue;
                     if (!isImg && !isAud) continue;
@@ -617,12 +877,23 @@ export default function ExportSMSScreen() {
     
     console.log('🕐 Timestamps:', dateFromTimestamp, '-', dateToTimestamp);
     
+    const normalizeDigits = (value) => (value || '').toString().replace(/\D/g, '');
+    const queryLower = (searchQuery || '').toLowerCase().trim();
+    const queryDigits = normalizeDigits(searchQuery);
+
     return conversations
       .filter(conv => {
-        // Filtrer par recherche
-        const searchLower = searchQuery.toLowerCase();
-        const name = (conv.name || conv.address).toLowerCase();
-        return name.includes(searchLower);
+        // Filtrer par recherche (nom + numéro)
+        if (!queryLower) return true;
+
+        const label = (conv.name || '').toString().toLowerCase();
+        const address = (conv.address || conv.id || '').toString();
+        const addressLower = address.toLowerCase();
+        const addressDigits = normalizeDigits(address);
+
+        const matchesText = label.includes(queryLower) || addressLower.includes(queryLower);
+        const matchesDigits = queryDigits ? addressDigits.includes(queryDigits) : false;
+        return matchesText || matchesDigits;
       })
       .map(conv => {
         // Filtrer les messages par plage de dates
@@ -642,7 +913,9 @@ export default function ExportSMSScreen() {
 
   // Conversations effectivement affichées: uniquement celles avec des messages dans la période
   const displayedConversations = useMemo(() => {
-    return filteredConversations.filter(c => (typeof c.filteredCount === 'number' ? c.filteredCount : c.messages?.length || 0) > 0);
+    // IMPORTANT: on affiche toutes les conversations; la période sert à afficher un compteur,
+    // pas à masquer des conversations (sinon on ne voit que les threads récents type pubs).
+    return filteredConversations;
   }, [filteredConversations]);
 
   if (loading) {
@@ -992,9 +1265,25 @@ export default function ExportSMSScreen() {
                           />
                         )}
                         {part.type === 'audio' && (
-                          <View style={styles.mmsAudioPlaceholder}>
-                            <Text style={styles.mmsAudioText}>🔊 Message vocal</Text>
-                          </View>
+                          <TouchableOpacity
+                            style={styles.mmsAudioPlaceholder}
+                            activeOpacity={0.7}
+                            onPressIn={(e) => {
+                              try {
+                                e?.stopPropagation?.();
+                              } catch (_) {}
+                            }}
+                            onPress={(e) => {
+                              try {
+                                e?.stopPropagation?.();
+                              } catch (_) {}
+                              playOrToggleAudioPart(item.id, part, pIdx);
+                            }}
+                          >
+                            <Text style={styles.mmsAudioText}>
+                              {playingAudioKey === `${item.id}_part${pIdx}` ? '⏸️ Pause' : '▶️ Lire'} · 🔊 Message vocal
+                            </Text>
+                          </TouchableOpacity>
                         )}
                       </View>
                     ))}

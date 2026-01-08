@@ -11,11 +11,14 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import SmsAndroid from 'react-native-get-sms-android';
+import { buildNumberToNameMap } from '../utils/contacts';
+import { normalizePhoneE164, formatForDisplay } from '../utils/phone';
 
 export default function SMSListScreen({ navigation }) {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [hasPermission, setHasPermission] = useState(false);
+  const [numberToName, setNumberToName] = useState(new Map());
 
   useEffect(() => {
     requestSMSPermission();
@@ -37,6 +40,28 @@ export default function SMSListScreen({ navigation }) {
         
         if (granted === PermissionsAndroid.RESULTS.GRANTED) {
           setHasPermission(true);
+          try {
+            const contactsGranted = await PermissionsAndroid.request(
+              PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+              {
+                title: 'Permission Contacts',
+                message: 'Chatbook Export peut afficher le nom de vos contacts au lieu des numéros',
+                buttonNeutral: 'Plus tard',
+                buttonNegative: 'Refuser',
+                buttonPositive: 'Autoriser',
+              }
+            );
+            if (contactsGranted === PermissionsAndroid.RESULTS.GRANTED) {
+              const map = await buildNumberToNameMap('FR');
+              setNumberToName(map);
+            } else {
+              setNumberToName(new Map());
+            }
+          } catch (e) {
+            console.warn('Impossible de charger les contacts:', e);
+            setNumberToName(new Map());
+          }
+
           loadConversations();
         } else {
           setHasPermission(false);
@@ -68,18 +93,23 @@ export default function SMSListScreen({ navigation }) {
         // Grouper par numéro de téléphone
         const grouped = {};
         sms.forEach(message => {
-          const address = message.address;
-          if (!grouped[address]) {
-            grouped[address] = {
-              id: address,
-              address,
-              name: message.person || null,
+          const rawAddress = message.address;
+          const normalized = normalizePhoneE164(rawAddress, 'FR') || String(rawAddress || '').trim();
+          const display = formatForDisplay(normalized) || String(rawAddress || '').trim();
+          const resolvedName = numberToName?.get(normalized) || null;
+
+          if (!grouped[normalized]) {
+            grouped[normalized] = {
+              id: normalized,
+              address: normalized,
+              displayAddress: display,
+              name: resolvedName || message.person || null,
               messages: [],
               lastMessage: message.body,
               lastDate: message.date,
             };
           }
-          grouped[address].messages.push(message);
+          grouped[normalized].messages.push(message);
         });
 
         // Convertir en tableau et trier par date
@@ -117,14 +147,14 @@ export default function SMSListScreen({ navigation }) {
     >
       <View style={styles.conversationIcon}>
         <Text style={styles.conversationIconText}>
-          {item.address.charAt(0).toUpperCase()}
+          {(item.name || item.displayAddress || item.address || '?').toString().charAt(0).toUpperCase()}
         </Text>
       </View>
       
       <View style={styles.conversationContent}>
         <View style={styles.conversationHeader}>
           <Text style={styles.conversationName} numberOfLines={1}>
-            {item.address}
+            {item.name || item.displayAddress || item.address}
           </Text>
           <Text style={styles.conversationDate}>
             {formatDate(item.lastDate)}

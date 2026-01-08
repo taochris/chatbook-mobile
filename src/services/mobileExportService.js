@@ -267,13 +267,40 @@ export async function uploadExportData(exportData) {
         // Gérer les médias MMS
         if (msg.isMms && msg.parts) {
           messageObj.parts = [];
+
+          const inferExtensionFromPart = (part) => {
+            try {
+              const mime = (part?.mimeType || '').toString().toLowerCase().trim();
+              const data = (part?.data || '').toString().toLowerCase();
+
+              // Prefer the filename extension if provided by Android
+              const match = data.match(/\.([a-z0-9]{2,5})\b/);
+              if (match && match[1]) {
+                const ext = match[1];
+                if (['mp3', 'm4a', 'aac', 'wav', 'ogg', 'opus', '3gp', '3gpp', 'amr'].includes(ext)) return ext;
+              }
+
+              if (mime === 'audio/mpeg' || mime === 'audio/mp3') return 'mp3';
+              if (mime === 'audio/mp4' || mime === 'audio/x-m4a' || mime === 'video/mp4') return 'm4a';
+              if (mime === 'audio/aac') return 'aac';
+              if (mime === 'audio/wav') return 'wav';
+              if (mime === 'audio/ogg' || mime === 'application/ogg') return 'ogg';
+              if (mime === 'audio/opus') return 'opus';
+              if (mime === 'audio/3gpp' || mime === 'video/3gpp') return '3gp';
+              if (mime === 'audio/amr') return 'amr';
+            } catch (_) {}
+
+            // Last-resort fallback
+            return 'amr';
+          };
+
           for (let i = 0; i < msg.parts.length; i++) {
             const part = msg.parts[i];
             const isImage = part.type === 'image' && exportData.options.includeImages;
             const isAudio = part.type === 'audio' && exportData.options.includeAudio;
 
             if (isImage || isAudio) {
-              const fileExt = part.type === 'image' ? 'jpg' : 'amr';
+              const fileExt = part.type === 'image' ? 'jpg' : inferExtensionFromPart(part);
               const storagePath = `mobile-imports/${code}/${msg.id}_part${i}.${fileExt}`;
 
               console.log('[mobileExportService] Queue media upload', {

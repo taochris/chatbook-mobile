@@ -158,6 +158,30 @@ public class MmsReaderModule extends ReactContextBaseJavaModule {
         mimeType = null;
       }
 
+      // Some MMS part content:// URIs return null for getType().
+      // Try reading the MMS part "ct" column directly.
+      if (mimeType == null) {
+        Cursor ctCursor = null;
+        try {
+          ctCursor = cr.query(contentUri, new String[] {"ct"}, null, null, null);
+          if (ctCursor != null && ctCursor.moveToFirst()) {
+            int ctIdx = ctCursor.getColumnIndex("ct");
+            if (ctIdx >= 0) {
+              String ct = ctCursor.getString(ctIdx);
+              if (ct != null && !ct.trim().isEmpty()) {
+                mimeType = ct;
+              }
+            }
+          }
+        } catch (Exception ignored) {
+          // keep null
+        } finally {
+          try {
+            if (ctCursor != null) ctCursor.close();
+          } catch (Exception ignored) {}
+        }
+      }
+
       String ext = "bin";
       if (mimeType != null) {
         if (mimeType.startsWith("image/")) {
@@ -168,6 +192,9 @@ public class MmsReaderModule extends ReactContextBaseJavaModule {
         if (ext == null || ext.trim().isEmpty()) ext = "bin";
         // Normalize common mime-derived extensions
         if ("jpeg".equalsIgnoreCase(ext)) ext = "jpg";
+        if ("3gpp".equalsIgnoreCase(ext)) ext = "3gp";
+        if ("amr-wb".equalsIgnoreCase(ext)) ext = "amr";
+        if ("x-wav".equalsIgnoreCase(ext)) ext = "wav";
       }
 
       File cacheDir = reactContext.getCacheDir();
