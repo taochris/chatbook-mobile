@@ -9,6 +9,7 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint;
 import com.facebook.react.defaults.DefaultReactNativeHost;
 import com.facebook.soloader.SoLoader;
 import com.chatbooktemp.mms.MmsReaderPackage;
+import com.chatbooktemp.smsreader.SmsReaderPackage;
 import java.util.List;
 
 public class MainApplication extends Application implements ReactApplication {
@@ -27,6 +28,7 @@ public class MainApplication extends Application implements ReactApplication {
           // Packages that cannot be autolinked yet can be added manually here, for example:
           // packages.add(new MyReactNativePackage());
           packages.add(new MmsReaderPackage());
+          packages.add(new SmsReaderPackage());
           return packages;
         }
 

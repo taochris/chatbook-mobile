@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,27 +6,66 @@ import {
   StyleSheet,
   ScrollView,
   StatusBar,
-  Animated,
   ImageBackground,
+  TextInput,
+  FlatList,
+  PermissionsAndroid,
+  Platform,
+  ActivityIndicator,
 } from 'react-native';
+import Contacts from 'react-native-contacts';
 
 export default function HomeScreen({ navigation }) {
-  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const [searchQuery, setSearchQuery] = useState('');
+  const [contacts, setContacts] = useState([]);
+  const [filteredContacts, setFilteredContacts] = useState([]);
+  const [loading, setLoading] = useState(false);
 
-  const handlePressIn = () => {
-    Animated.spring(scaleAnim, {
-      toValue: 0.95,
-      useNativeDriver: true,
-    }).start();
+  useEffect(() => {
+    loadContacts();
+  }, []);
+
+  useEffect(() => {
+    if (searchQuery.trim()) {
+      const filtered = contacts.filter(c => 
+        c.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        c.phoneNumbers.some(p => p.number.includes(searchQuery))
+      ).slice(0, 10);
+      setFilteredContacts(filtered);
+    } else {
+      setFilteredContacts([]);
+    }
+  }, [searchQuery, contacts]);
+
+  const loadContacts = async () => {
+    if (Platform.OS !== 'android') return;
+    
+    try {
+      const permission = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.READ_CONTACTS
+      );
+      
+      if (permission === PermissionsAndroid.RESULTS.GRANTED) {
+        setLoading(true);
+        const allContacts = await Contacts.getAll();
+        const withPhone = allContacts.filter(c => c.phoneNumbers && c.phoneNumbers.length > 0);
+        setContacts(withPhone);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error('Erreur chargement contacts:', err);
+      setLoading(false);
+    }
   };
 
-  const handlePressOut = () => {
-    Animated.spring(scaleAnim, {
-      toValue: 1,
-      friction: 3,
-      tension: 40,
-      useNativeDriver: true,
-    }).start();
+  const handleSelectContact = (contact) => {
+    const phone = contact.phoneNumbers[0]?.number;
+    if (phone) {
+      navigation.navigate('Export', { 
+        contactName: contact.displayName,
+        contactPhone: phone 
+      });
+    }
   };
 
   return (
@@ -48,42 +87,54 @@ export default function HomeScreen({ navigation }) {
         </Text>
       </View>
 
-      {/* Fonctionnalités */}
-      <View style={styles.featuresContainer}>
-        <View style={styles.featureCard}>
-          <Text style={styles.featureTitle}>Rapide</Text>
-          <Text style={styles.featureText}>
-            Export en quelques secondes
-          </Text>
-        </View>
-
-        <View style={styles.featureCard}>
-          <Text style={styles.featureTitle}>Créatif</Text>
-          <Text style={styles.featureText}>
-            Personnalisez votre livre
-          </Text>
-        </View>
-
-        <View style={styles.featureCard}>
-          <Text style={styles.featureTitle}>Sécurisé</Text>
-          <Text style={styles.featureText}>
-            Données chiffrées, expirées après 24h
-          </Text>
-        </View>
+      {/* Recherche de contact */}
+      <View style={styles.searchContainer}>
+        <Text style={styles.searchLabel}>Rechercher un contact à exporter</Text>
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Nom ou numéro de téléphone..."
+          placeholderTextColor="#9ca3af"
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          autoCapitalize="none"
+        />
+        
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="small" color="#34d399" />
+            <Text style={styles.loadingText}>Chargement des contacts...</Text>
+          </View>
+        )}
+        
+        {filteredContacts.length > 0 && (
+          <View style={styles.suggestionsContainer}>
+            <FlatList
+              data={filteredContacts}
+              keyExtractor={(item) => item.recordID}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.suggestionItem}
+                  onPress={() => handleSelectContact(item)}
+                >
+                  <View style={styles.suggestionIcon}>
+                    <Text style={styles.suggestionIconText}>
+                      {item.displayName.charAt(0).toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={styles.suggestionContent}>
+                    <Text style={styles.suggestionName}>{item.displayName}</Text>
+                    <Text style={styles.suggestionPhone}>
+                      {item.phoneNumbers[0]?.number}
+                    </Text>
+                  </View>
+                  <Text style={styles.suggestionArrow}>→</Text>
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        )}
       </View>
 
-      {/* Bouton principal en bas */}
-      <TouchableOpacity 
-        activeOpacity={1}
-        onPressIn={handlePressIn}
-        onPressOut={handlePressOut}
-        onPress={() => navigation.navigate('Export')}
-      >
-        <Animated.View style={[styles.primaryButton, { transform: [{ scale: scaleAnim }] }]}>
-          <Text style={styles.primaryButtonText}>Commencer l'export</Text>
-          <Text style={styles.primaryButtonIcon}>→</Text>
-        </Animated.View>
-      </TouchableOpacity>
         </ScrollView>
       </ImageBackground>
     </View>
@@ -157,29 +208,98 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
   },
-  featuresContainer: {
-    marginBottom: 40,
+  searchContainer: {
     marginHorizontal: 16,
+    marginBottom: 20,
   },
-  featureCard: {
-    backgroundColor: 'transparent',
-    borderRadius: 16,
-    padding: 18,
-    marginBottom: 14,
-    borderWidth: 1,
+  searchLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#065f46',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  searchInput: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 15,
+    color: '#1f2937',
+    borderWidth: 2,
     borderColor: '#34d399',
   },
-  featureTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#34d399',
-    marginBottom: 6,
-    textAlign: 'center',
+  loadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
   },
-  featureText: {
+  loadingText: {
+    marginLeft: 8,
     fontSize: 13,
-    color: '#475569',
-    lineHeight: 19,
-    textAlign: 'center',
+    color: '#6b7280',
+  },
+  suggestionsContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    marginTop: 10,
+    maxHeight: 300,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+  },
+  suggestionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  suggestionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#34d399',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  suggestionIconText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#ffffff',
+  },
+  suggestionContent: {
+    flex: 1,
+  },
+  suggestionName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1f2937',
+    marginBottom: 2,
+  },
+  suggestionPhone: {
+    fontSize: 13,
+    color: '#6b7280',
+  },
+  suggestionArrow: {
+    fontSize: 18,
+    color: '#34d399',
+    fontWeight: 'bold',
+  },
+  secondaryButton: {
+    backgroundColor: 'transparent',
+    borderRadius: 16,
+    padding: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    borderWidth: 2,
+    borderColor: '#34d399',
+    marginHorizontal: 16,
+  },
+  secondaryButtonText: {
+    color: '#065f46',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });
