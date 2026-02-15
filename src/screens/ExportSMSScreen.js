@@ -20,7 +20,7 @@ import Sound from 'react-native-sound';
 import RNFS from 'react-native-fs';
 
 export default function ExportSMSScreen({ route }) {
-  const { contactName, contactPhone } = route?.params || {};
+  const { contactName, contactPhone, contactPhones = [] } = route?.params || {};
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedConversations, setSelectedConversations] = useState(new Set());
@@ -35,12 +35,6 @@ export default function ExportSMSScreen({ route }) {
   const [editingDateType, setEditingDateType] = useState(null); // 'from' | 'to'
   const [exportCode, setExportCode] = useState(null);
   const [showExportModal, setShowExportModal] = useState(false);
-  const [includeText, setIncludeText] = useState(true);
-  const [includeImages, setIncludeImages] = useState(true);
-  const [includeAudio, setIncludeAudio] = useState(true);
-  const [audioFiles, setAudioFiles] = useState([]);
-  const [audioTotalSize, setAudioTotalSize] = useState(0);
-  const [showAudioList, setShowAudioList] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [selectedMessagesInConv, setSelectedMessagesInConv] = useState(new Set());
@@ -55,7 +49,6 @@ export default function ExportSMSScreen({ route }) {
   const yearInputRef = useRef(null);
   const autoOpenDone = useRef(false);
 
-  const AUDIO_MAX_SIZE = 500 * 1024 * 1024; // 500 MB
 
   const normalizeTimestampMs = (value) => {
     const n = Number(value) || 0;
@@ -294,14 +287,62 @@ export default function ExportSMSScreen({ route }) {
         return;
       }
 
+      // Certains contacts ont plusieurs numéros/formats (+33 / 06 / avec espaces).
+      // On interroge toutes les variantes pour éviter de rater les SMS texte.
+      const candidateAddresses = Array.from(
+        new Set([phone, ...(Array.isArray(contactPhones) ? contactPhones : [])]
+          .map((v) => (v || '').toString().trim())
+          .filter(Boolean))
+      );
+
+      const fetchMessagesForAddresses = async (limit) => {
+        const perAddress = await Promise.all(candidateAddresses.map(async (addr) => {
+          try {
+            const rows = await SmsReader.getMessagesByAddress(addr, limit);
+            return {
+              address: addr,
+              rows: Array.isArray(rows) ? rows : [],
+            };
+          } catch (e) {
+            console.warn('[SmsReader] getMessagesByAddress failed for', addr, e?.message || e);
+            return { address: addr, rows: [] };
+          }
+        }));
+
+        const withOrigin = perAddress.flatMap((entry) =>
+          entry.rows.map((row) => ({ ...row, __queryAddress: entry.address }))
+        );
+
+        const unique = Array.from(
+          new Map(
+            withOrigin.map((m) => [
+              m?._id || m?.id || `${m?.date || 0}-${m?.type || ''}-${(m?.body || '').toString().slice(0, 80)}`,
+              m,
+            ])
+          ).values()
+        );
+
+        const bestAddress = [...perAddress]
+          .sort((a, b) => b.rows.length - a.rows.length)[0]?.address || phone;
+
+        console.log('[SmsReader] address match summary', perAddress.map((p) => ({
+          address: p.address,
+          count: p.rows.length,
+        })));
+
+        return { unique, bestAddress };
+      };
+
       // Charger un aperçu rapidement (pour que l'UI s'affiche vite)
       const PREVIEW_FETCH_LIMIT = 3000;
-      const messages = await SmsReader.getMessagesByAddress(phone, PREVIEW_FETCH_LIMIT);
+      const previewPayload = await fetchMessagesForAddresses(PREVIEW_FETCH_LIMIT);
+      const messages = previewPayload.unique;
       
       // Normaliser les données pour correspondre au format attendu par l'app
       const normalizedMessages = messages.map((m, idx) => {
-        // Les timestamps sont déjà normalisés en ms côté Java (SMS en ms natif, MMS converti de s→ms)
-        let timestamp = Number(m.date);
+        // Sécurité: certains devices retournent encore des secondes pour les SMS.
+        // On normalise ici pour éviter que les SMS soient filtrés hors période.
+        let timestamp = normalizeTimestampMs(m.date);
         
         // Log les 3 premiers messages pour debug
         if (idx < 3) {
@@ -323,7 +364,7 @@ export default function ExportSMSScreen({ route }) {
       // Créer la conversation avec TOUS les messages pour l'export
       const conversation = {
         id: phone,
-        address: phone,
+        address: previewPayload.bestAddress,
         name: name || phone,
         messages: normalizedMessages, // Aperçu (ex: 3000 derniers)
         allMessages: null, // sera rempli en arrière-plan
@@ -343,10 +384,11 @@ export default function ExportSMSScreen({ route }) {
       // Charger TOUT en arrière-plan pour l'export (sans bloquer l'UI)
       setTimeout(async () => {
         try {
-          const full = await SmsReader.getMessagesByAddress(phone, 0);
+          const fullPayload = await fetchMessagesForAddresses(0);
+          const full = fullPayload.unique;
           const normalizedFull = (Array.isArray(full) ? full : []).map(m => {
-            // Timestamps déjà normalisés en ms côté Java
-            let timestamp = Number(m.date);
+            // Même normalisation défensive pour le chargement complet.
+            let timestamp = normalizeTimestampMs(m.date);
             return {
               ...m,
               id: m._id || m.id || `temp_${Math.random()}`,
@@ -362,6 +404,7 @@ export default function ExportSMSScreen({ route }) {
             if (c.id !== phone) return c;
             return {
               ...c,
+              address: fullPayload.bestAddress || c.address,
               allMessages: normalizedFull,
               // garder l'aperçu dans messages pour l'UI, mais mettre à jour le compteur global
               messageCount: normalizedFull.length,
@@ -612,9 +655,6 @@ export default function ExportSMSScreen({ route }) {
           list.sort((a, b) => b.lastDate - a.lastDate);
 
           setConversations(list);
-          // Par défaut, pas d'audios détectés tant qu'on n'a pas d'extraction réelle
-          setAudioFiles([]);
-          updateAudioSize([]);
         })
         .catch((err) => {
           console.error('Erreur lecture SMS:', err);
@@ -814,7 +854,7 @@ export default function ExportSMSScreen({ route }) {
     const initialConv = {
       ...conv,
       messages: sortedSms,
-      allMessages: conv.messages || []
+      allMessages: sourceMessages
     };
     
     setSelectedConversation(initialConv);
@@ -1001,21 +1041,6 @@ export default function ExportSMSScreen({ route }) {
     setDebugStats(null);
   };
 
-  const updateAudioSize = (files) => {
-    const total = (files || [])
-      .filter(f => f.selected)
-      .reduce((sum, f) => sum + (f.size || 0), 0);
-    setAudioTotalSize(total);
-  };
-
-  const toggleAudioFile = (index) => {
-    const newFiles = [...audioFiles];
-    if (newFiles[index]) {
-      newFiles[index].selected = !newFiles[index].selected;
-      setAudioFiles(newFiles);
-      updateAudioSize(newFiles);
-    }
-  };
 
   const toggleConversation = (id) => {
     const newSelected = new Set(selectedConversations);
@@ -1043,13 +1068,6 @@ export default function ExportSMSScreen({ route }) {
       }
     }
 
-    if (includeAudio && audioTotalSize > AUDIO_MAX_SIZE) {
-      Alert.alert(
-        'Erreur',
-        `Les audios dépassent 500 MB (${(audioTotalSize / 1024 / 1024).toFixed(1)} MB)`
-      );
-      return;
-    }
 
     setLoading(true);
     
@@ -1084,7 +1102,7 @@ export default function ExportSMSScreen({ route }) {
       try {
         if (Platform.OS === 'android' && !isDirectMode) {
           const mmsReader = NativeModules?.MmsReader;
-          if (mmsReader?.getMmsMedia && (includeImages || includeAudio)) {
+          if (mmsReader?.getMmsMedia) {
             const fromTs = new Date(dateFrom).setHours(0, 0, 0, 0);
             const toTs = new Date(dateTo).setHours(23, 59, 59, 999);
 
@@ -1124,7 +1142,6 @@ export default function ExportSMSScreen({ route }) {
                     const isImg = mime.toLowerCase().startsWith('image/');
                     const isAud = isAudioPart(mime, data);
 
-                    if ((isImg && !includeImages) || (isAud && !includeAudio)) continue;
                     if (!isImg && !isAud) continue;
 
                     messageParts.push({
@@ -1184,9 +1201,9 @@ export default function ExportSMSScreen({ route }) {
         dateFrom,
         dateTo,
         options: {
-          includeText,
-          includeImages,
-          includeAudio
+          includeText: true,
+          includeImages: true,
+          includeAudio: true
         }
       });
       
@@ -1490,27 +1507,7 @@ export default function ExportSMSScreen({ route }) {
               </View>
             </>
           }
-          ListFooterComponent={
-            <>
-              {/* 4. Contenu à inclure */}
-              <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Contenu à inclure</Text>
-                <TouchableOpacity style={styles.mediaOption} onPress={() => setIncludeText(!includeText)}>
-                  <Checkbox value={includeText} onValueChange={setIncludeText} />
-                  <Text style={styles.mediaLabel}>Messages texte</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.mediaOption} onPress={() => setIncludeImages(!includeImages)}>
-                  <Checkbox value={includeImages} onValueChange={setIncludeImages} />
-                  <Text style={styles.mediaLabel}>Photos/Images</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.mediaOption} onPress={() => setIncludeAudio(!includeAudio)}>
-                  <Checkbox value={includeAudio} onValueChange={setIncludeAudio} />
-                  <Text style={styles.mediaLabel}>Messages vocaux</Text>
-                  {includeAudio && <Text style={styles.audioLimit}>Max 500 MB</Text>}
-                </TouchableOpacity>
-              </View>
-            </>
-          }
+          ListFooterComponent={<View style={{ height: 20 }} />}
           ListEmptyComponent={
             <View style={{ paddingVertical: 40, alignItems: 'center' }}>
               <Text style={{ color: '#6b7280', textAlign: 'center' }}>
@@ -1781,26 +1778,7 @@ export default function ExportSMSScreen({ route }) {
             </View>
           </>
         }
-        ListFooterComponent={
-          <>
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Contenu à inclure</Text>
-              <TouchableOpacity style={styles.mediaOption} onPress={() => setIncludeText(!includeText)}>
-                <Checkbox value={includeText} onValueChange={setIncludeText} />
-                <Text style={styles.mediaLabel}>Messages texte</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.mediaOption} onPress={() => setIncludeImages(!includeImages)}>
-                <Checkbox value={includeImages} onValueChange={setIncludeImages} />
-                <Text style={styles.mediaLabel}>Photos/Images</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.mediaOption} onPress={() => setIncludeAudio(!includeAudio)}>
-                <Checkbox value={includeAudio} onValueChange={setIncludeAudio} />
-                <Text style={styles.mediaLabel}>Messages vocaux</Text>
-                {includeAudio && <Text style={styles.audioLimit}>Max 500 MB</Text>}
-              </TouchableOpacity>
-            </View>
-          </>
-        }
+        ListFooterComponent={<View style={{ height: 20 }} />}
       />
 
       <View style={styles.exportBar}>
@@ -2156,101 +2134,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#9ca3af',
     marginTop: 4,
-  },
-  mediaOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-  },
-  mediaLabel: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#1f2937',
-    marginLeft: 12,
-  },
-  audioLimit: {
-    fontSize: 12,
-    color: '#ef4444',
-    fontWeight: '600',
-  },
-  audioSection: {
-    marginTop: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    backgroundColor: '#fef3c7',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#fcd34d',
-  },
-  audioGauge: {
-    marginBottom: 12,
-  },
-  gaugeLabel: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  gaugeLabelText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#92400e',
-  },
-  gaugeWarning: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#ef4444',
-  },
-  gaugeBar: {
-    height: 8,
-    backgroundColor: '#e5e7eb',
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  gaugeFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  audioListToggle: {
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-  },
-  audioListToggleText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#92400e',
-  },
-  audioItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: '#fcd34d',
-  },
-  audioInfo: {
-    flex: 1,
-    marginLeft: 8,
-  },
-  audioName: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: '#1f2937',
-  },
-  audioSize: {
-    fontSize: 11,
-    color: '#9ca3af',
-    marginTop: 2,
   },
   exportButton: {
     backgroundColor: '#6ee7b7',

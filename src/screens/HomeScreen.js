@@ -59,11 +59,15 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleSelectContact = (contact) => {
-    const phone = contact.phoneNumbers[0]?.number;
+    const contactPhones = (contact.phoneNumbers || [])
+      .map((p) => p?.number)
+      .filter(Boolean);
+    const phone = contactPhones[0];
     if (phone) {
       navigation.navigate('Export', { 
         contactName: contact.displayName,
-        contactPhone: phone 
+        contactPhone: phone,
+        contactPhones,
       });
     }
   };
